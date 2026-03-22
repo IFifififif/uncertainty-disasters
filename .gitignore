@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.venv/
+venv/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Output (keep structure, ignore generated files)
+output/tables/*.csv
+output/tables/*.xls
+output/tables/*.xlsx
+output/figures/*.pdf
+output/figures/*.png
+
+# Data (large files)
+# Uncomment if tracking data separately:
+# data/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Misc
+*.log
+*.tmp
