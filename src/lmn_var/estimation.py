@@ -65,10 +65,13 @@ class LMNVAR:
         print("\n--- Step 1: VAR with FE estimation ---")
 
         # Variable names (matching Stata code)
-        var_names = ['ydgdp', 'avgret', 'lavgvol']
+        # Note: Data uses 'ret' and 'vol' instead of 'avgret' and 'lavgvol'
+        var_names = ['ydgdp', 'ret', 'vol']
 
-        # Build lagged variables
+        # Build lagged variables and time variable
         data = self.df.copy()
+        # Create yq_int (year-quarter integer for time FE)
+        data['yq_int'] = data['year'] * 4 + data['quarter']
         for var in var_names:
             for lag in range(1, self.Nlags + 1):
                 data[f'l{lag}{var}'] = data.groupby('country')[var].shift(lag)
@@ -119,18 +122,46 @@ class LMNVAR:
         self.eq_data = data
 
         # Compute covariance of residuals
-        # Align residuals across equations
-        common_idx = None
+        # Use the residuals from each equation (already computed)
+        # Need to align them on a common sample
+        
+        # Find common valid observations across all equations
+        all_lag_cols = [f'l{l}{v}' for l in range(1, self.Nlags + 1) for v in var_names]
+        common_valid = np.ones(len(data), dtype=bool)
         for dep_var in var_names:
-            valid = data[[dep_var] + [f'l{l}{v}' for l in range(1, self.Nlags + 1) for v in var_names] + ['country', 'yq_int']].notna().all(axis=1)
-            idx = data[valid].index
-            if common_idx is None:
-                common_idx = idx
-            else:
-                common_idx = common_idx.intersection(idx)
-
-        resid_matrix = np.column_stack([residuals[v].loc[common_idx] for v in var_names])
-        self.Sigma_hat = (resid_matrix.T @ resid_matrix) / len(common_idx)
+            cols_needed = [dep_var] + all_lag_cols + ['country', 'yq_int']
+            valid = data[cols_needed].notna().all(axis=1).values
+            common_valid = common_valid & valid
+        
+        print(f"  Common sample size: {common_valid.sum()}")
+        
+        # Recompute residuals on common sample for covariance
+        resid_common = {}
+        for eq_idx, dep_var in enumerate(var_names):
+            cols_needed = [dep_var] + all_lag_cols + ['country', 'yq_int']
+            valid = data[cols_needed].notna().all(axis=1).values
+            eq_data = data[valid & common_valid].copy()
+            
+            y = eq_data[dep_var].values.astype(np.float64)
+            regressor_names = all_lag_cols
+            X = eq_data[regressor_names].values.astype(np.float64)
+            
+            # Demean by FE
+            for fe_col in ['country', 'yq_int']:
+                groups = eq_data[fe_col].values
+                unique_groups = np.unique(groups)
+                for g in unique_groups:
+                    mask = groups == g
+                    if mask.sum() > 0:
+                        y[mask] -= y[mask].mean()
+                        X[mask] -= X[mask].mean(axis=0)
+            
+            # Use stored beta
+            beta = A_hat[eq_idx, :]
+            resid_common[dep_var] = y - X @ beta
+        
+        resid_matrix = np.column_stack([resid_common[v] for v in var_names])
+        self.Sigma_hat = (resid_matrix.T @ resid_matrix) / resid_matrix.shape[0]
 
         print(f"  Residual covariance (diagonal): {np.diag(self.Sigma_hat)}")
 
@@ -163,12 +194,17 @@ class LMNVAR:
         Sigma_chol = np.linalg.cholesky(Sigma)
 
         # Build companion form for IRF computation
-        B1hat = self.A_hat.T.reshape(NX * self.Nlags, NX)
-        B1tilde = np.zeros((NX * self.Nlags, NX * self.Nlags))
-        B1tilde[:NX, :NX * self.Nlags] = B1hat
+        # A_hat is (NX, NX * Nlags), we need B1hat as (NX, NX * Nlags)
+        B1hat = self.A_hat.copy()  # (NX, NX * Nlags) = (3, 9)
+        B1tilde = np.zeros((NX * self.Nlags, NX * self.Nlags))  # (9, 9)
+        B1tilde[:NX, :NX * self.Nlags] = B1hat  # (3, 9) -> (3, 9)
         if self.Nlags > 1:
             for ct in range(self.Nlags - 1):
-                B1tilde[ct * NX + np.arange(NX), ct * NX + np.arange(NX)] = np.eye(NX)
+                # Identity matrices on subdiagonal
+                # B1tilde[(ct+1)*NX:(ct+2)*NX, ct*NX:(ct+1)*NX] = I(NX)
+                row_start = (ct + 1) * NX
+                col_start = ct * NX
+                B1tilde[row_start:row_start + NX, col_start:col_start + NX] = np.eye(NX)
 
         # Disaster event restrictions
         # These define the admissible set: impulse responses must satisfy
@@ -197,7 +233,12 @@ class LMNVAR:
             IRF = np.zeros((self.lengthIRF, NX, NX))
             for varct in range(NX):
                 for t in range(self.lengthIRF):
-                    IRFvec = np.linalg.matrix_power(B1tilde, t - 1) @ Btilde[:, varct]
+                    if t == 0:
+                        # Period 0: contemporaneous impact
+                        IRFvec = Btilde[:, varct]
+                    else:
+                        # Period t: B1^(t-1) @ B
+                        IRFvec = np.linalg.matrix_power(B1tilde, t - 1) @ Btilde[:, varct]
                     IRF[t, :, varct] = IRFvec[:NX]
 
             # Check admissibility

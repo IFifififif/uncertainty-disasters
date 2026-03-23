@@ -194,12 +194,17 @@ class IVVAR:
         NX = self.NX
         Nlags = self.Nlags
 
-        # Build companion form
+        # Build companion form for VAR(p)
+        # B1tilde = [A1, A2, ..., Ap]
+        #           [I,  0,  ..., 0  ]
+        #           [0,  I,  ..., 0  ]
+        #           ...
         B1tilde = np.zeros((NX * Nlags, NX * Nlags))
         B1tilde[:NX, :NX * Nlags] = B1hat
         if Nlags > 1:
             for ct in range(Nlags - 1):
-                row_start = ct * NX
+                # Identity matrices on subdiagonal
+                row_start = (ct + 1) * NX
                 col_start = ct * NX
                 B1tilde[row_start:row_start + NX, col_start:col_start + NX] = np.eye(NX)
 
@@ -207,14 +212,22 @@ class IVVAR:
         Btilde[:NX, :NX] = Bhat
 
         # Compute IRFs
+        # For t=0: IRF = B (contemporaneous impact)
+        # For t>0: IRF = B1^(t-1) @ B
         IRF = np.zeros((lengthIRF, NX, NX))
         for varct in range(NX):
             for t in range(lengthIRF):
-                IRFvec = np.linalg.matrix_power(B1tilde, t - 1) @ Btilde[:, varct]
+                if t == 0:
+                    # Period 0: contemporaneous impact
+                    IRFvec = Btilde[:, varct]
+                else:
+                    # Period t: B1^(t-1) @ B
+                    IRFvec = np.linalg.matrix_power(B1tilde, t - 1) @ Btilde[:, varct]
                 IRF[t, :, varct] = IRFvec[:NX]
             # Scale: sqrt(var(X(:,varct))) * IRF / Bhat(varct,varct)
-            IRF[:, :, varct] = (np.sqrt(np.var(X[:, varct])) *
-                                IRF[:, :, varct] / Bhat[varct, varct])
+            if Bhat[varct, varct] != 0:
+                IRF[:, :, varct] = (np.sqrt(np.var(X[:, varct])) *
+                                    IRF[:, :, varct] / Bhat[varct, varct])
 
         return IRF
 
