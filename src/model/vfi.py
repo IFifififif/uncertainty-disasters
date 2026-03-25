@@ -90,7 +90,12 @@ def initialize_forecast_matrices(
     kbarfcstmat = np.full((anum, snum, snum, kbarnum), kbar_mid)
     pfcstmat = np.full((anum, snum, snum, kbarnum), p.pval)
     wfcstmat = np.full((anum, snum, snum, kbarnum), p.theta / p.pval)
-    kbarfcstinds = np.ones((anum, snum, snum, kbarnum), dtype=np.int64)
+    # IMPORTANT: Fortran uses 1-based indexing, Python uses 0-based
+    # Fortran initializes kbarfcstinds = 1, which corresponds to index 0 in Python
+    # This is used for interpolation: weight * V[..., ind+1] + (1-weight) * V[..., ind]
+    # In Fortran: ind=1, weight=0 -> V[..., 2] * 0 + V[..., 1] * 1 = V[1] (first element)
+    # In Python: ind=0, weight=0 -> V[..., 1] * 0 + V[..., 0] * 1 = V[0] (first element)
+    kbarfcstinds = np.zeros((anum, snum, snum, kbarnum), dtype=np.int64)  # 0 in Python = 1 in Fortran
     kbarfcstweights = np.zeros((anum, snum, snum, kbarnum))
     
     return ForecastMatrices(
@@ -283,8 +288,14 @@ def howard_acceleration_step(
             EV = 0.0
             for exogprimect in range(numexog_next):
                 # Interpolated continuation value (Fortran lines 850-851)
-                Vnextval = (weight * V_old[polstar, exogprimect, ind + 1] +
-                           (1.0 - weight) * V_old[polstar, exogprimect, ind])
+                # Note: kbarnum=2, so ind can be 0 or 1 (after our fix)
+                # When ind=1, ind+1=2 would be out of bounds, so clamp
+                if ind >= kbarnum - 1:
+                    # At upper boundary, just use the upper value
+                    Vnextval = V_old[polstar, exogprimect, kbarnum - 1]
+                else:
+                    Vnextval = (weight * V_old[polstar, exogprimect, ind + 1] +
+                               (1.0 - weight) * V_old[polstar, exogprimect, ind])
                 
                 EV += pr_mat[exogct, exogprimect] * Vnextval
             
@@ -333,8 +344,12 @@ def compute_ev_matrix(
         
         ev = 0.0
         for exogprimect in range(numexog_next):
-            Vnextval = (weight * V[polct, exogprimect, ind + 1] +
-                       (1.0 - weight) * V[polct, exogprimect, ind])
+            # Boundary check to prevent index out of bounds
+            if ind >= kbarnum - 1:
+                Vnextval = V[polct, exogprimect, kbarnum - 1]
+            else:
+                Vnextval = (weight * V[polct, exogprimect, ind + 1] +
+                           (1.0 - weight) * V[polct, exogprimect, ind])
             ev += pr_mat[exogct, exogprimect] * Vnextval
         
         EVmat[exogct, polct, fcstct] = ev
