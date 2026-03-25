@@ -69,13 +69,13 @@ class ModelParameters:
     # =====================
     # Productivity Processes
     # =====================
-    # Idiosyncratic productivity
+    # Idiosyncratic productivity (Fortran lines 351-354)
     rhoz: float = 0.95
-    sigmaz: float = 0.0507515557155377
+    sigmaz: float = 0.0507515557155377  # Fortran: sigmaz = 0.0507515557155377
     
-    # Aggregate productivity  
+    # Aggregate productivity (Fortran lines 357-358)
     rhoa: float = 0.95
-    sigmaa: float = 0.00668420914017636
+    sigmaa: float = 0.00668420914017636  # Fortran: sigmaa = 0.00668420914017636
     
     # =====================
     # Grid Sizes (full mode matching Fortran VOL_GROWTH_wrapper.f90)
@@ -88,46 +88,50 @@ class ModelParameters:
     kbarnum: int = 2       # Aggregate capital forecast grid (Fortran: kbarnum = 2)
     
     # =====================
-    # Grid Bounds
+    # Grid Bounds (Fortran lines 379-384, 339-341, 359-360)
     # =====================
-    kmin: float = 0.75
-    lmin: float = 0.02
-    amin: float = 0.8
-    amax: float = 1.2
-    kbarmin: float = 3.0
-    kbarmax: float = 10.0
+    kmin: float = 0.75      # Capital grid minimum (Fortran: kmin = 0.75)
+    lmin: float = 0.02      # Labor grid minimum (Fortran: lmin = 0.02)
+    amin: float = 0.8       # Aggregate productivity minimum (Fortran: amin = 0.8)
+    amax: float = 1.2       # Aggregate productivity maximum (Fortran: amax = 1.2)
+    kbarmin: float = 3.0    # Aggregate capital forecast min (Fortran: kbarmin = 3.0)
+    kbarmax: float = 10.0   # Aggregate capital forecast max (Fortran: kbarmax = 10.0)
     
     # =====================
-    # Simulation Controls
+    # Simulation Controls (Fortran lines 394-406)
     # =====================
-    Ncountries: int = 500      # Number of countries
-    Tper: int = 100            # Time periods per country
-    numdiscard: int = 500      # Burn-in periods
-    nfirms: int = 800          # Total firms
-    nfirmspub: int = 200       # Public firms (stock market)
+    Ncountries: int = 500      # Number of countries (Fortran: Ncountries = 500)
+    Tper: int = 100            # Time periods per country (Fortran: Tper = 100)
+    numdiscard: int = 500      # Burn-in periods (Fortran: numdiscard = 500)
+    nfirms: int = 800          # Total firms (Fortran: nfirms = 800)
+    nfirmspub: int = 200       # Public firms (Fortran: nfirmspub = 200)
+    zinit: int = 3             # Initial productivity position (Fortran: zinit = 3)
+    ainit: int = 3             # Initial agg productivity position (Fortran: ainit = 3)
+    sinit: int = 1             # Initial uncertainty state (Fortran: sinit = 1)
     
     # =====================
-    # VFI Controls
+    # VFI Controls (Fortran lines 418-420)
     # =====================
-    vfmaxit: int = 50          # Max VFI iterations
-    vferrortol: float = 1e-4   # VFI convergence tolerance
-    accelmaxit: int = 200      # Howard acceleration iterations
+    vfmaxit: int = 50          # Max VFI iterations (Fortran: vfmaxit = 50)
+    vferrortol: float = 1e-4   # VFI convergence tolerance (Fortran: vferrortol = 1e-4)
+    accelmaxit: int = 200      # Howard acceleration iterations (Fortran: accelmaxit = 200)
     
     # =====================
-    # Price/GE Controls
+    # Price/GE Controls (Fortran lines 327-328, 423-424)
     # =====================
-    maxpit: int = 50
-    perrortol: float = 1e-3
-    pval: float = 1.34         # Price level
+    maxpit: int = 50           # Max price iterations (Fortran: maxpit = 50)
+    perrortol: float = 1e-3    # Price convergence tolerance (Fortran: perrortol = 1e-3)
+    pval: float = 1.34         # Price level (Fortran: pval = 1.34)
+    disttol: float = 1e-4      # Distribution tolerance (Fortran: disttol = 1e-4)
     
     # =====================
-    # IRF Controls
+    # IRF Controls (Fortran lines 409-413)
     # =====================
-    numsimIRF: int = 2500      # Number of IRF simulations
-    lengthIRF: int = 100       # Length of each IRF
-    shockperIRF: int = 45      # Period to shock
-    shocklengthIRF: int = 5    # Duration of low unc
-    numdiscIRF: int = 45       # IRF burn-in
+    numsimIRF: int = 2500      # Number of IRF simulations (Fortran: numsimIRF = 2500)
+    lengthIRF: int = 100       # Length of each IRF (Fortran: lengthIRF = 100)
+    shockperIRF: int = 45      # Period to shock (Fortran: shockperIRF = 45)
+    shocklengthIRF: int = 5    # Duration of low unc (Fortran: shocklengthIRF = 5)
+    numdiscIRF: int = 45       # IRF burn-in (Fortran: numdiscIRF = 45)
     
     # =====================
     # Disaster Parameters (for GMM)

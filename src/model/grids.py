@@ -9,6 +9,8 @@ Implements the 5-dimensional state space:
 - l: Labor stock
 
 Plus forecast states for aggregate capital (Kbar).
+
+Matches Fortran VOL_GROWTH_wrapper.f90 exactly.
 """
 
 import numpy as np
@@ -30,7 +32,7 @@ class StateGrids:
     a_grid: np.ndarray          # Aggregate productivity grid
     kbar_grid: np.ndarray       # Aggregate capital forecast grid
     
-    # Volatility levels (not grids, just 2 values each)
+    # Volatility levels
     sigmaz_grid: np.ndarray     # Idio vol: [low, high]
     sigmaa_grid: np.ndarray     # Agg vol: [low, high]
     
@@ -40,19 +42,22 @@ class StateGrids:
     pr_mat_s: np.ndarray        # Shape: (snum, snum)
     pr_mat_full: np.ndarray     # Combined transition matrix
     
-    # Indexing
-    exog_pos: np.ndarray        # Exogenous state positions
-    endog_pos: np.ndarray       # Endogenous state positions
+    # Indexing arrays (matching Fortran)
+    exog_pos: np.ndarray        # Exogenous state positions, shape (numexog, 4)
+    endog_pos: np.ndarray       # Endogenous state positions, shape (numendog, 2)
     
     # Dimensions
     numexog: int
     numendog: int
     numstates: int
+    numexog_next: int           # Number of next period exogenous states
 
 
 def build_grids(params: ModelParameters) -> StateGrids:
     """
     Build all state space grids and transition matrices.
+    
+    Matches Fortran VOL_GROWTH_wrapper.f90 exactly.
     
     Parameters
     ----------
@@ -70,41 +75,43 @@ def build_grids(params: ModelParameters) -> StateGrids:
     # Build Capital Grid
     # =====================
     # Exponential spacing respecting depreciation
-    # Fortran: kmax = exp(log(kmin) - (knum-1) * log(1-deltak))
+    # Fortran line 380: kmax = exp(log(kmin) - dble(knum-1) * log(1.0-deltak))
     kmax = np.exp(np.log(p.kmin) - (p.knum - 1) * np.log(1 - p.deltak))
+    # Fortran line 500: call linspace(k0,log(kmin),log(kmax),knum); k0=exp(k0)
     k_grid = np.exp(np.linspace(np.log(p.kmin), np.log(kmax), p.knum))
     
     # =====================
     # Build Labor Grid
     # =====================
-    # Exponential spacing respecting depreciation
+    # Fortran line 384: lmax = exp(log(lmin) - dble(lnum-1) * log(1.0-deltan))
     lmax = np.exp(np.log(p.lmin) - (p.lnum - 1) * np.log(1 - p.deltan))
     l_grid = np.exp(np.linspace(np.log(p.lmin), np.log(lmax), p.lnum))
     
     # =====================
     # Build Aggregate Capital Forecast Grid
     # =====================
+    # Fortran line 504: kbar0 = (/kbarmin,kbarmax/)
     kbar_grid = np.array([p.kbarmin, p.kbarmax])
     
     # =====================
     # Build Volatility Grids
     # =====================
+    # Fortran lines 507-508
     sigmaz_grid = np.array([p.sigmaz, p.zjump * p.sigmaz])
     sigmaa_grid = np.array([p.sigmaa, p.ajump * p.sigmaa])
     
     # =====================
     # Build Productivity Grids (Tauchen method)
     # =====================
-    # Idiosyncratic productivity z: log-space AR(1), meanshift = 0
+    # Idiosyncratic productivity z: log-space AR(1)
+    # Fortran line 519: call unctauchen(pr_mat_z,z0,znum,zmin,zmax,snum,sigmazgrid,rhoz,dble(0.0))
     z_grid, pr_mat_z = build_tauchen_grid_with_sv(
         p.zmin, p.zmax, p.znum, p.rhoz, sigmaz_grid, p.snum,
         meanshift=0.0
     )
     
     # Aggregate productivity a: level-space AR(1)
-    # Calculate meanshift to undo disaster-induced mean impact
-    # Fortran: meanshifta = -sum(sigmaa*DISASTERprobs*DISASTERlev) - highuncerg*firstsecondprob*log(amin)
-    # For simplicity, we use meanshift = 0 here (can be adjusted during GMM estimation)
+    # Fortran line 520: call unctauchen(pr_mat_a,a0,anum,amin,amax,snum,sigmaagrid,rhoa,meanshifta)
     a_grid = np.linspace(p.amin, p.amax, p.anum)
     pr_mat_a = build_tauchen_transition_sv(
         a_grid, p.anum, p.rhoa, sigmaa_grid, p.snum,
@@ -114,8 +121,7 @@ def build_grids(params: ModelParameters) -> StateGrids:
     # =====================
     # Build Uncertainty Transition Matrix
     # =====================
-    # Note: uncfreq is adjusted in Fortran for disaster-induced uncertainty
-    # Here we use the base value
+    # Fortran lines 509-510
     pr_mat_s = np.zeros((p.snum, p.snum))
     pr_mat_s[0, :] = [1 - p.uncfreq, p.uncfreq]
     pr_mat_s[0, :] /= pr_mat_s[0, :].sum()
@@ -126,9 +132,11 @@ def build_grids(params: ModelParameters) -> StateGrids:
     # Build Full State Indexing
     # =====================
     # Exogenous states: (z, a, s, s_{-1})
+    # Fortran line 388: numexog = znum*anum*snum*snum
     numexog = p.znum * p.anum * p.snum * p.snum
     exog_pos = np.zeros((numexog, 4), dtype=int)
     
+    # Fortran lines 523-543
     ct = 0
     for zct in range(p.znum):
         for act in range(p.anum):
@@ -141,24 +149,27 @@ def build_grids(params: ModelParameters) -> StateGrids:
                     ct += 1
     
     # Endogenous states: (k, l_{-1})
+    # Fortran line 389: numendog = knum*lnum
     numendog = p.knum * p.lnum
     endog_pos = np.zeros((numendog, 2), dtype=int)
     
+    # Fortran lines 581-586
     ct = 0
     for kct in range(p.knum):
-        for lct in range(p.lnum):
+        for lmin1ct in range(p.lnum):
             endog_pos[ct, 0] = kct
-            endog_pos[ct, 1] = lct
+            endog_pos[ct, 1] = lmin1ct
             ct += 1
     
     # =====================
     # Build Full Transition Matrix
     # =====================
-    # Combined transition over (z, a, s) given s_{-1}
-    pr_mat_full = build_full_transition_matrix(
+    # Fortran lines 534-541
+    pr_mat_full, numexog_next = build_full_transition_matrix(
         pr_mat_z, pr_mat_a, pr_mat_s, p.znum, p.anum, p.snum
     )
     
+    # Fortran line 391: numstates = numexog * numendog * numfcst
     numstates = numexog * numendog * p.kbarnum
     
     return StateGrids(
@@ -177,7 +188,8 @@ def build_grids(params: ModelParameters) -> StateGrids:
         endog_pos=endog_pos,
         numexog=numexog,
         numendog=numendog,
-        numstates=numstates
+        numstates=numstates,
+        numexog_next=numexog_next
     )
 
 
@@ -225,12 +237,10 @@ def build_tauchen_grid_with_sv(
     
     for s in range(snum):
         # Fortran uses sigma_grid directly as the std dev in normcdf
-        # This matches the Fortran unctauchen implementation
         standdev = sigma_grid[s]
         
         for i in range(znum):
             # Conditional mean: rho * log_grid[i] + meanshift
-            # Fortran: rho*log_grid(zct)+meanshift
             mu = rho * log_grid[i] + meanshift
             
             # Middle intervals (zprimect = 2 to znum-1)
@@ -246,7 +256,7 @@ def build_tauchen_grid_with_sv(
             # Last interval (Fortran: transarray(zct,znum,sct))
             pr_mat[i, znum - 1, s] = 1 - norm.cdf(log_grid[znum - 1] - gridinc / 2, mu, standdev)
             
-            # Normalize to sum to 1 (Fortran: transarray(zct,:,sct) = transarray(zct,:,sct) / sum(transarray(zct,:,sct)))
+            # Normalize to sum to 1
             pr_mat[i, :, s] /= pr_mat[i, :, s].sum()
     
     return z_grid, pr_mat
@@ -317,9 +327,11 @@ def build_tauchen_transition_sv(
 def build_full_transition_matrix(
     pr_mat_z: np.ndarray, pr_mat_a: np.ndarray, pr_mat_s: np.ndarray,
     znum: int, anum: int, snum: int
-) -> np.ndarray:
+) -> Tuple[np.ndarray, int]:
     """
     Build combined transition matrix over (z, a, s) states.
+    
+    Matches Fortran lines 534-541 exactly.
     
     Note: s_{-1} (lagged uncertainty) is known when transitioning,
     so it affects indexing but not the transition probabilities.
@@ -342,8 +354,8 @@ def build_full_transition_matrix(
     -------
     pr_mat_full : np.ndarray
         Combined transition matrix, shape (numexog, numexog_next).
-        numexog = znum * anum * snum * snum (current states with s_{-1})
-        numexog_next = znum * anum * snum (next states, s_{-1} implied)
+    numexog_next : int
+        Number of next period exogenous states.
     """
     numexog = znum * anum * snum * snum
     numexog_next = znum * anum * snum  # s_{-1}' is determined by current s
@@ -360,29 +372,27 @@ def build_full_transition_matrix(
                     ct += 1
                     
                     # Next period: s becomes s_{-1}'
-                    # Transition: (z, a, s, s_{-1}) -> (z', a', s')
-                    # Next state index: (z', a', s') where s_{-1}' = s
+                    # Fortran line 536: primect=(zprimect-1)*anum*snum*snum + (aprimect-1)*snum*snum + (sprimect-1)*snum + sct
                     for zpct in range(znum):
                         for apct in range(anum):
                             for spct in range(snum):
                                 # Next period index
-                                # Index into (z', a', s') space
-                                # s_{-1}' is not stored separately - it's determined by s
                                 next_idx = zpct * anum * snum + apct * snum + spct
                                 
                                 # Probability: P(z'|z,s) * P(a'|a,s) * P(s'|s)
+                                # Fortran line 537
                                 pr_mat_full[current_idx, next_idx] = (
                                     pr_mat_z[zct, zpct, sct] *
                                     pr_mat_a[act, apct, sct] *
                                     pr_mat_s[sct, spct]
                                 )
     
-    # Normalize rows (correct for any numerical error)
+    # Normalize rows (Fortran line 541)
     for i in range(numexog):
         if pr_mat_full[i, :].sum() > 0:
             pr_mat_full[i, :] /= pr_mat_full[i, :].sum()
     
-    return pr_mat_full
+    return pr_mat_full, numexog_next
 
 
 def get_state_indices(

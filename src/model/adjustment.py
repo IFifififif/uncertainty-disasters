@@ -4,15 +4,16 @@ NON-CONVEX Adjustment Costs for BBT (2024) Model.
 This module implements the key feature distinguishing this model from
 standard DSGE models: non-convex adjustment costs for both capital and labor.
 
-Key Features:
-1. Capital irreversibility: Selling capital is costly
-2. Fixed adjustment costs: Lump-sum cost when adjusting
+Key Features (matching Fortran VOL_GROWTH_wrapper.f90 exactly):
+1. Capital partial irreversibility: Only negative investment (selling capital) is costly
+2. Capital fixed adjustment cost: Lump-sum cost proportional to output when adjusting
 3. Hiring costs: Linear cost when expanding labor
 4. Firing costs: Linear cost when reducing labor
+5. Labor fixed adjustment cost: Lump-sum cost proportional to output when adjusting labor
 
-Original Fortran code:
-- ACk: Capital adjustment cost function
-- ACl: Labor adjustment cost function
+Original Fortran functions:
+- ACk(z,a,k,l,...): Capital adjustment cost
+- ACl(z,a,k,l,l_{-1},...): Labor adjustment cost
 """
 
 import numpy as np
@@ -49,21 +50,38 @@ def output(z: float, a: float, k: float, l: float,
 def capital_adjustment_cost(
     k_prime: float, k: float,
     capirrev: float = 0.339, capfix: float = 0.0,
-    deltak: float = 0.026
+    deltak: float = 0.026,
+    Y: float = 1.0
 ) -> float:
     """
     NON-CONVEX capital adjustment cost.
     
-    This is the CRITICAL difference from standard quadratic adjustment costs!
+    Matches Fortran ACk function exactly.
     
     The cost includes:
-    1. Purchase cost for new capital: max(I, 0) = max(k' - (1-delta)*k, 0)
-    2. Irreversibility cost: capirrev * |k' - k| when adjusting
-    3. Fixed cost: capfix * k when adjusting (if capfix > 0)
+    1. Partial irreversibility: Only charged when investment is NEGATIVE
+       - If I < 0: ACk += |I| * capirrev
+       - This captures the cost of selling capital (resale value < purchase price)
     
-    Fortran code (base_lib.f90):
+    2. Fixed adjustment cost: Charged when ANY non-zero investment
+       - If |I| > 0: ACk += Y * capfix
+       - This captures disruption costs proportional to output
+    
+    Fortran code (VOL_GROWTH_wrapper.f90):
     ```fortran
-    ACk = capirrev * abs(k_new - k_old) + capfix * I(k_new != k_old)
+    ival = kprimeval - (1.0-deltak) * kval
+    ACk = 0.0
+    
+    ! Partial irreversibility costs (only for negative investment)
+    if (ival<-changetol) then
+        ACk = ACk - ival * capirrev
+    end if
+    
+    ! Fixed disruption costs (for any non-zero investment)
+    if (abs(ival)>changetol) then
+        yval = y(zval,aval,kval,lval,alpha,nu)
+        ACk = ACk + yval * capfix
+    end if
     ```
     
     Parameters
@@ -75,60 +93,78 @@ def capital_adjustment_cost(
     capirrev : float
         Irreversibility cost parameter (partial irreversibility).
     capfix : float
-        Fixed adjustment cost.
+        Fixed adjustment cost (proportional to output).
     deltak : float
         Depreciation rate.
+    Y : float
+        Current output (for fixed cost calculation).
     
     Returns
     -------
     ACk : float
         Total capital adjustment cost.
     """
+    changetol = 1e-10
+    
     # Investment
     I = k_prime - (1 - deltak) * k
     
-    # Adjustment magnitude
-    adj = np.abs(k_prime - k)
+    # Start at 0
+    ACk = 0.0
     
-    # Is there an adjustment? (tolerance for numerical precision)
-    is_adjusting = adj > 1e-10
+    # Partial irreversibility cost: only for NEGATIVE investment
+    # This is the key difference from standard adjustment costs!
+    if I < -changetol:
+        ACk = ACk - I * capirrev  # -I = |I|
     
-    # Irreversibility cost: linear cost of adjustment
-    # This captures partial irreversibility - selling capital is costly
-    ac_irrev = capirrev * adj
+    # Fixed adjustment cost: for ANY non-zero investment
+    if abs(I) > changetol:
+        ACk = ACk + Y * capfix
     
-    # Fixed cost: only incurred if adjusting
-    ac_fix = capfix * k * is_adjusting
-    
-    return ac_irrev + ac_fix
+    return ACk
 
 
 def labor_adjustment_cost(
-    l_prime: float, l: float, w: float,
+    l: float, l_prev: float, w: float,
     hirelin: float = 0.072, firelin: float = 0.072,
-    labfix: float = 0.096
+    labfix: float = 0.096,
+    deltan: float = 0.088,
+    Y: float = 1.0
 ) -> float:
     """
     NON-CONVEX labor adjustment cost.
     
-    The cost includes:
-    1. Hiring cost: hirelin * max(l' - l, 0) * w
-    2. Firing cost: firelin * max(l - l', 0) * w
-    3. Fixed cost: labfix * w when adjusting
+    Matches Fortran ACl function exactly.
     
-    Fortran code (base_lib.f90):
+    The cost includes:
+    1. Fixed adjustment cost: Only charged when labor changes
+       - If |h| > 0: ACl += Y * labfix
+    
+    2. Hiring cost: Linear cost when expanding labor
+       - If h > 0: ACl += h * w * hirelin
+    
+    3. Firing cost: Linear cost when reducing labor
+       - If h < 0: ACl += |h| * w * firelin
+    
+    Fortran code (VOL_GROWTH_wrapper.f90):
     ```fortran
-    ACl = hirelin * max(l_new - l_old, 0) + firelin * max(l_old - l_new, 0) 
-        + labfix * I(l_new != l_old)
-    ACl = ACl * w
+    hval = lval - (1.0-deltan)*lmin1val
+    ACl = 0.0
+    
+    if (abs(hval)>changetol) then
+        yval = y(zval,aval,kval,lval,alpha,nu)
+        ACl = ACl + labfix * yval     ! Fixed costs
+        if (hval<-changetol) ACl = ACl - hval * wval * firelin  ! Firing costs
+        if (hval>changetol) ACl = ACl + hval * wval * hirelin   ! Hiring costs
+    end if
     ```
     
     Parameters
     ----------
-    l_prime : float
-        Next period labor.
     l : float
-        Current labor.
+        Current period labor.
+    l_prev : float
+        Previous period labor (l_{-1}).
     w : float
         Wage rate.
     hirelin : float
@@ -136,32 +172,45 @@ def labor_adjustment_cost(
     firelin : float
         Firing cost parameter (linear).
     labfix : float
-        Fixed labor adjustment cost.
+        Fixed labor adjustment cost (proportional to output).
+    deltan : float
+        Labor depreciation (worker separations).
+    Y : float
+        Current output (for fixed cost calculation).
     
     Returns
     -------
     ACl : float
         Total labor adjustment cost.
     """
-    # Labor change
-    dl = l_prime - l
+    changetol = 1e-10
     
-    # Hiring cost (only if expanding)
-    ac_hire = hirelin * max(dl, 0)
+    # Net hiring = l - (1-deltan)*l_prev
+    h = l - (1 - deltan) * l_prev
     
-    # Firing cost (only if contracting)
-    ac_fire = firelin * max(-dl, 0)
+    # Start at 0
+    ACl = 0.0
     
-    # Fixed cost: only incurred if adjusting
-    is_adjusting = np.abs(dl) > 1e-10
-    ac_fix = labfix * is_adjusting
+    # Only charge costs if labor actually changes
+    if abs(h) > changetol:
+        # Fixed adjustment cost (proportional to output)
+        ACl = ACl + labfix * Y
+        
+        # Firing cost (h < 0 means firing)
+        if h < -changetol:
+            ACl = ACl - h * w * firelin  # -h = |h|
+        
+        # Hiring cost (h > 0 means hiring)
+        if h > changetol:
+            ACl = ACl + h * w * hirelin
     
-    return (ac_hire + ac_fire + ac_fix) * w
+    return ACl
 
 
 def compute_adjustment_costs_grid(
     k_grid: np.ndarray, l_grid: np.ndarray, w: float,
-    params: ModelParameters
+    params: ModelParameters,
+    Y: float = 1.0
 ) -> tuple:
     """
     Pre-compute adjustment cost matrices for efficiency.
@@ -176,6 +225,8 @@ def compute_adjustment_costs_grid(
         Wage rate.
     params : ModelParameters
         Model parameters.
+    Y : float
+        Output level (for fixed costs).
     
     Returns
     -------
@@ -195,7 +246,8 @@ def compute_adjustment_costs_grid(
         for j in range(knum):
             ACk_mat[i, j] = capital_adjustment_cost(
                 k_grid[j], k_grid[i],
-                params.capirrev, params.capfix, params.deltak
+                params.capirrev, params.capfix, params.deltak,
+                Y=Y
             )
     
     # Labor adjustment costs
@@ -204,7 +256,8 @@ def compute_adjustment_costs_grid(
         for j in range(lnum):
             ACl_mat[i, j] = labor_adjustment_cost(
                 l_grid[j], l_grid[i], w,
-                params.hirelin, params.firelin, params.labfix
+                params.hirelin, params.firelin, params.labfix, params.deltan,
+                Y=Y
             )
     
     return ACk_mat, ACl_mat
@@ -318,27 +371,65 @@ class AdjustmentCostCalculator:
             p.alpha, p.nu
         )
         
-        # Capital adjustment cost matrix (knum x knum)
+        # Capital adjustment cost matrix (base, without output for fixed cost)
+        # Note: Fixed cost depends on Y, so we compute base cost separately
         self.ACk_base = np.zeros((p.knum, p.knum))
         for i in range(p.knum):
             for j in range(p.knum):
-                self.ACk_base[i, j] = capital_adjustment_cost(
-                    g.k_grid[j], g.k_grid[i],
-                    p.capirrev, p.capfix, p.deltak
-                )
+                # Base irreversibility cost (no output dependence)
+                I = self.I_mat[i, j]
+                if I < -1e-10:
+                    self.ACk_base[i, j] = -I * p.capirrev  # |I| * capirrev
     
-    def get_labor_adj_cost(self, l_prime_idx: int, l_idx: int, w: float) -> float:
+    def get_capital_adj_cost(self, k_idx: int, k_prime_idx: int, Y: float = 1.0) -> float:
         """
-        Get labor adjustment cost for given indices and wage.
+        Get capital adjustment cost for given indices and output.
         
         Parameters
         ----------
-        l_prime_idx : int
-            Next period labor index.
+        k_idx : int
+            Current capital index.
+        k_prime_idx : int
+            Next period capital index.
+        Y : float
+            Current output.
+        
+        Returns
+        -------
+        ACk : float
+            Capital adjustment cost.
+        """
+        p = self.params
+        
+        I = self.I_mat[k_idx, k_prime_idx]
+        ACk = 0.0
+        
+        # Partial irreversibility
+        if I < -1e-10:
+            ACk = ACk - I * p.capirrev
+        
+        # Fixed cost
+        if abs(I) > 1e-10:
+            ACk = ACk + Y * p.capfix
+        
+        return ACk
+    
+    def get_labor_adj_cost(
+        self, l_idx: int, l_prev_idx: int, w: float, Y: float = 1.0
+    ) -> float:
+        """
+        Get labor adjustment cost for given indices.
+        
+        Parameters
+        ----------
         l_idx : int
             Current labor index.
+        l_prev_idx : int
+            Previous labor index.
         w : float
             Wage rate.
+        Y : float
+            Current output.
         
         Returns
         -------
@@ -349,8 +440,9 @@ class AdjustmentCostCalculator:
         g = self.grids
         
         return labor_adjustment_cost(
-            g.l_grid[l_prime_idx], g.l_grid[l_idx], w,
-            p.hirelin, p.firelin, p.labfix
+            g.l_grid[l_idx], g.l_grid[l_prev_idx], w,
+            p.hirelin, p.firelin, p.labfix, p.deltan,
+            Y=Y
         )
     
     def get_period_return(
@@ -387,10 +479,10 @@ class AdjustmentCostCalculator:
         Y = self.Y_mat[z_idx, a_idx, k_idx, l_idx]
         
         # Capital adjustment cost
-        ACk = self.ACk_base[k_idx, k_prime_idx]
+        ACk = self.get_capital_adj_cost(k_idx, k_prime_idx, Y)
         
         # Labor adjustment cost
-        ACl = self.get_labor_adj_cost(l_prime_idx, l_prev_idx, w)
+        ACl = self.get_labor_adj_cost(l_prime_idx, l_prev_idx, w, Y)
         
         # Investment
         I = self.I_mat[k_idx, k_prime_idx]

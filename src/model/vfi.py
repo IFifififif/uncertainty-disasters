@@ -1,17 +1,21 @@
 """
 Value Function Iteration (VFI) for BBT (2024) Model.
 
-Implements the Bellman equation solution with:
-1. Howard acceleration (policy iteration)
-2. Forecast rules for aggregate capital and prices
-3. Non-convex adjustment costs
-4. Full 5D state space support
+Implements the Bellman equation solution matching Fortran VOL_GROWTH_wrapper.f90 exactly:
+1. Howard acceleration (policy iteration) - accelmaxit iterations
+2. Expected value matrix computation (EVmat)
+3. RHS optimization step
+4. Forecast rules for aggregate capital and prices
+5. Interpolation over aggregate capital forecast grid
 
-The model uses policy function iteration rather than pure VFI:
-1. Howard acceleration step: Evaluate Bellman with fixed policies
-2. Optimization step: Find optimal policies given values
-
-This matches the Fortran implementation in VOL_GROWTH_wrapper.f90.
+Key arrays (matching Fortran):
+- V(endog, exog, fcst): Value function
+- polmat(endog, exog, fcst): Policy indices
+- EVmat(exog, pol, fcst): Expected continuation values
+- kbarfcstinds: Interpolation indices for aggregate capital
+- kbarfcstweights: Interpolation weights
+- pfcstmat: Price forecast matrix
+- WLmat: Wage bill matrix
 """
 
 import numpy as np
@@ -22,7 +26,10 @@ import warnings
 
 from .params import ModelParameters
 from .grids import StateGrids, get_state_indices
-from .adjustment import AdjustmentCostCalculator, output, capital_adjustment_cost, labor_adjustment_cost
+from .adjustment import (
+    output, capital_adjustment_cost, labor_adjustment_cost,
+    AdjustmentCostCalculator
+)
 
 
 @dataclass
@@ -33,30 +40,199 @@ class VFISolution:
     polmat: np.ndarray         # Policy indices, shape (numendog, numexog, kbarnum)
     kprime_pos: np.ndarray     # Capital policy indices
     lpol_pos: np.ndarray       # Labor policy indices
+    EVmat: np.ndarray          # Expected value matrix
     converged: bool
     iterations: int
     vf_error: float
     pol_error: float
 
 
+@dataclass
+class ForecastMatrices:
+    """Container for forecast matrices used in VFI."""
+    
+    kbarfcstinds: np.ndarray    # Interpolation indices, shape (anum, snum, snum, kbarnum)
+    kbarfcstweights: np.ndarray # Interpolation weights, shape (anum, snum, snum, kbarnum)
+    pfcstmat: np.ndarray        # Price forecast, shape (anum, snum, snum, kbarnum)
+    wfcstmat: np.ndarray        # Wage forecast, shape (anum, snum, snum, kbarnum)
+    kbarfcstmat: np.ndarray     # Aggregate capital forecast, shape (anum, snum, snum, kbarnum)
+
+
+def initialize_forecast_matrices(
+    params: ModelParameters,
+    grids: StateGrids
+) -> ForecastMatrices:
+    """
+    Initialize forecast matrices.
+    
+    These are used for interpolation of aggregate capital and prices.
+    
+    Matches Fortran:
+    ```fortran
+    kbarfcstmat(:,:,:,:) = (kbar0(1)+kbar0(2))/dble(2.0)
+    pfcstmat(:,:,:,:) = pval
+    wfcstmat(:,:,:,:) = theta/pval
+    kbarfcstinds(:,:,:,:) = 1
+    kbarfcstweights(:,:,:,:) = 0.0
+    ```
+    """
+    p = params
+    g = grids
+    
+    # Dimensions
+    anum = p.anum
+    snum = p.snum
+    kbarnum = p.kbarnum
+    
+    # Initialize with default values (Fortran lines 512-516)
+    kbar_mid = (g.kbar_grid[0] + g.kbar_grid[1]) / 2.0
+    
+    kbarfcstmat = np.full((anum, snum, snum, kbarnum), kbar_mid)
+    pfcstmat = np.full((anum, snum, snum, kbarnum), p.pval)
+    wfcstmat = np.full((anum, snum, snum, kbarnum), p.theta / p.pval)
+    kbarfcstinds = np.ones((anum, snum, snum, kbarnum), dtype=np.int64)
+    kbarfcstweights = np.zeros((anum, snum, snum, kbarnum))
+    
+    return ForecastMatrices(
+        kbarfcstinds=kbarfcstinds,
+        kbarfcstweights=kbarfcstweights,
+        pfcstmat=pfcstmat,
+        wfcstmat=wfcstmat,
+        kbarfcstmat=kbarfcstmat
+    )
+
+
+def build_return_matrices(
+    params: ModelParameters,
+    grids: StateGrids,
+    adj_calc: AdjustmentCostCalculator,
+    fcst_mats: ForecastMatrices
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Pre-compute all return matrices for VFI.
+    
+    Matches Fortran lines 699-783:
+    - Ymat: Output matrix
+    - Imat: Investment matrix
+    - ACkmat: Capital adjustment cost matrix
+    - AClmat: Labor adjustment cost matrix
+    - WLmat: Wage bill matrix
+    
+    Returns
+    -------
+    Ymat, Imat, ACkmat, AClmat, WLmat : np.ndarray
+        Pre-computed matrices.
+    """
+    p = params
+    g = grids
+    
+    znum = p.znum
+    anum = p.anum
+    knum = p.knum
+    lnum = p.lnum
+    snum = p.snum
+    kbarnum = p.kbarnum
+    
+    # Output matrix: Ymat(z, a, k, l)
+    # Fortran line 699-712
+    Ymat = np.zeros((znum, anum, knum, lnum))
+    for zct in range(znum):
+        for act in range(anum):
+            for kct in range(knum):
+                for lct in range(lnum):
+                    Ymat[zct, act, kct, lct] = output(
+                        g.z_grid[zct], g.a_grid[act],
+                        g.k_grid[kct], g.l_grid[lct],
+                        p.alpha, p.nu
+                    )
+    
+    # Investment matrix: Imat(k, k')
+    # Fortran line 715-720
+    Imat = np.zeros((knum, knum))
+    for kct in range(knum):
+        for kprimect in range(knum):
+            Imat[kct, kprimect] = g.k_grid[kprimect] - (1 - p.deltak) * g.k_grid[kct]
+    
+    # Capital adjustment cost matrix: ACkmat(z, a, k, l, k')
+    # Fortran line 723-739
+    ACkmat = np.zeros((znum, anum, knum, lnum, knum))
+    for zct in range(znum):
+        for act in range(anum):
+            for kct in range(knum):
+                for lct in range(lnum):
+                    for kprimect in range(knum):
+                        ACkmat[zct, act, kct, lct, kprimect] = capital_adjustment_cost(
+                            g.k_grid[kprimect], g.k_grid[kct],
+                            p.capirrev, p.capfix, p.deltak
+                        )
+    
+    # Labor adjustment cost matrix: AClmat(exog, k, l, l_{-1}, fcst)
+    # This depends on wage which depends on forecast state
+    # Fortran line 742-766
+    numexog = g.numexog
+    AClmat = np.zeros((numexog, knum, lnum, lnum, kbarnum))
+    
+    for exogct in range(numexog):
+        act = g.exog_pos[exogct, 1]
+        sct = g.exog_pos[exogct, 2]
+        smin1ct = g.exog_pos[exogct, 3]
+        
+        for kct in range(knum):
+            for lct in range(lnum):
+                for lmin1ct in range(lnum):
+                    for fcstct in range(kbarnum):
+                        wfcstval = fcst_mats.wfcstmat[act, sct, smin1ct, fcstct]
+                        AClmat[exogct, kct, lct, lmin1ct, fcstct] = labor_adjustment_cost(
+                            g.l_grid[lct], g.l_grid[lmin1ct], wfcstval,
+                            p.hirelin, p.firelin, p.labfix
+                        )
+    
+    # Wage bill matrix: WLmat(a, s, s_{-1}, fcst, l)
+    # Fortran line 769-783
+    WLmat = np.zeros((anum, snum, snum, kbarnum, lnum))
+    for act in range(anum):
+        for sct in range(snum):
+            for smin1ct in range(snum):
+                for fcstct in range(kbarnum):
+                    for lct in range(lnum):
+                        WLmat[act, sct, smin1ct, fcstct, lct] = (
+                            fcst_mats.wfcstmat[act, sct, smin1ct, fcstct] * g.l_grid[lct]
+                        )
+    
+    return Ymat, Imat, ACkmat, AClmat, WLmat
+
+
 @jit(nopython=True, parallel=True)
-def _howard_acceleration_step(
+def howard_acceleration_step(
     V: np.ndarray,
     polmat: np.ndarray,
-    returns_matrix: np.ndarray,
+    Ymat: np.ndarray,
+    Imat: np.ndarray,
+    ACkmat: np.ndarray,
+    AClmat: np.ndarray,
+    WLmat: np.ndarray,
+    pfcstmat: np.ndarray,
+    kbarfcstinds: np.ndarray,
+    kbarfcstweights: np.ndarray,
     pr_mat: np.ndarray,
+    exog_pos: np.ndarray,
+    endog_pos: np.ndarray,
     beta: float,
     numendog: int,
     numexog: int,
     kbarnum: int,
     numexog_next: int,
-    n_accel: int
+    n_accel: int,
+    znum: int,
+    anum: int,
+    knum: int,
+    lnum: int,
+    snum: int
 ) -> np.ndarray:
     """
     Howard acceleration: evaluate Bellman with fixed policies.
     
-    This iterates the Bellman operator n_accel times while keeping
-    policies fixed. This speeds up convergence significantly.
+    Matches Fortran lines 814-867 exactly.
     
     V(s) = R(s, pi(s)) + beta * E[V(s') | s, pi(s)]
     """
@@ -65,58 +241,186 @@ def _howard_acceleration_step(
     for accel in range(n_accel):
         V_old = V_new.copy()
         
-        for endogct in prange(numendog):
-            for exogct in range(numexog):
-                for fcstct in range(kbarnum):
-                    # Get policy
-                    pol_idx = polmat[endogct, exogct, fcstct]
-                    
-                    # Period return
-                    period_return = returns_matrix[endogct, exogct, fcstct, pol_idx]
-                    
-                    # Expected continuation value
-                    EV = 0.0
-                    for exogprimct in range(numexog_next):
-                        EV += pr_mat[exogct, exogprimct] * V_old[pol_idx, exogprimct, fcstct]
-                    
-                    V_new[endogct, exogct, fcstct] = period_return + beta * EV
+        # Loop over all states
+        for ct in prange(numendog * numexog * kbarnum):
+            # Extract indices
+            endogct = ct // (numexog * kbarnum)
+            remainder = ct % (numexog * kbarnum)
+            exogct = remainder // kbarnum
+            fcstct = remainder % kbarnum
+            
+            # Extract exogenous state positions
+            zct = exog_pos[exogct, 0]
+            act = exog_pos[exogct, 1]
+            sct = exog_pos[exogct, 2]
+            smin1ct = exog_pos[exogct, 3]
+            
+            # Extract endogenous state positions
+            kct = endog_pos[endogct, 0]
+            lmin1ct = endog_pos[endogct, 1]
+            
+            # Get policy
+            polstar = polmat[endogct, exogct, fcstct]
+            
+            # Extract policy positions
+            kprimect = endog_pos[polstar, 0]
+            lct = endog_pos[polstar, 1]
+            
+            # Period return (Fortran lines 837-839)
+            period_return = pfcstmat[act, sct, smin1ct, fcstct] * (
+                Ymat[zct, act, kct, lct]
+                - ACkmat[zct, act, kct, lct, kprimect]
+                - AClmat[exogct, kct, lct, lmin1ct, fcstct]
+                - Imat[kct, kprimect]
+                - WLmat[act, sct, smin1ct, fcstct, lct]
+            )
+            
+            # Interpolation for aggregate capital forecast
+            ind = kbarfcstinds[act, sct, smin1ct, fcstct]
+            weight = kbarfcstweights[act, sct, smin1ct, fcstct]
+            
+            # Expected continuation value
+            EV = 0.0
+            for exogprimect in range(numexog_next):
+                # Interpolated continuation value (Fortran lines 850-851)
+                Vnextval = (weight * V_old[polstar, exogprimect, ind + 1] +
+                           (1.0 - weight) * V_old[polstar, exogprimect, ind])
+                
+                EV += pr_mat[exogct, exogprimect] * Vnextval
+            
+            V_new[endogct, exogct, fcstct] = period_return + beta * EV
     
     return V_new
 
 
-@jit(nopython=True)
-def _compute_ev_matrix(
+@jit(nopython=True, parallel=True)
+def compute_ev_matrix(
     V: np.ndarray,
     pr_mat: np.ndarray,
+    kbarfcstinds: np.ndarray,
+    kbarfcstweights: np.ndarray,
+    exog_pos: np.ndarray,
     numendog: int,
     numexog: int,
     kbarnum: int,
-    numexog_next: int
+    numexog_next: int,
+    anum: int,
+    snum: int
 ) -> np.ndarray:
     """
     Compute expected continuation values for all state-policy combinations.
     
-    EV[exog, pol, fcst] = sum over exog' of P[exog, exog'] * V[pol, exog', fcst]
+    Matches Fortran lines 870-902.
+    
+    EV[exog, pol, fcst] = sum over exog' of P[exog, exog'] * V[pol, exog', fcst_interpolated]
     """
-    EV_mat = np.zeros((numexog, numendog, kbarnum))
+    EVmat = np.zeros((numexog, numendog, kbarnum))
     
-    for exogct in range(numexog):
+    for ct in prange(numendog * numexog * kbarnum):
+        polct = ct // (numexog * kbarnum)
+        remainder = ct % (numexog * kbarnum)
+        exogct = remainder // kbarnum
+        fcstct = remainder % kbarnum
+        
+        # Get act and sct
+        act = exog_pos[exogct, 1]
+        sct = exog_pos[exogct, 2]
+        smin1ct = exog_pos[exogct, 3]
+        
+        # Interpolation
+        ind = kbarfcstinds[act, sct, smin1ct, fcstct]
+        weight = kbarfcstweights[act, sct, smin1ct, fcstct]
+        
+        ev = 0.0
+        for exogprimect in range(numexog_next):
+            Vnextval = (weight * V[polct, exogprimect, ind + 1] +
+                       (1.0 - weight) * V[polct, exogprimect, ind])
+            ev += pr_mat[exogct, exogprimect] * Vnextval
+        
+        EVmat[exogct, polct, fcstct] = ev
+    
+    return EVmat
+
+
+@jit(nopython=True, parallel=True)
+def optimization_step(
+    Ymat: np.ndarray,
+    Imat: np.ndarray,
+    ACkmat: np.ndarray,
+    AClmat: np.ndarray,
+    WLmat: np.ndarray,
+    pfcstmat: np.ndarray,
+    EVmat: np.ndarray,
+    exog_pos: np.ndarray,
+    endog_pos: np.ndarray,
+    beta: float,
+    numendog: int,
+    numexog: int,
+    kbarnum: int,
+    znum: int,
+    anum: int,
+    knum: int,
+    lnum: int
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Find optimal policies for each state.
+    
+    Matches Fortran lines 904-943.
+    
+    For each state, find policy that maximizes:
+    RHS[pol] = R(s, pol) + beta * EV[exog, pol, fcst]
+    """
+    V_new = np.zeros((numendog, numexog, kbarnum))
+    polmat_new = np.zeros((numendog, numexog, kbarnum), dtype=np.int64)
+    
+    for ct in prange(numendog * numexog * kbarnum):
+        endogct = ct // (numexog * kbarnum)
+        remainder = ct % (numexog * kbarnum)
+        exogct = remainder // kbarnum
+        fcstct = remainder % kbarnum
+        
+        # Extract state positions
+        zct = exog_pos[exogct, 0]
+        act = exog_pos[exogct, 1]
+        sct = exog_pos[exogct, 2]
+        smin1ct = exog_pos[exogct, 3]
+        kct = endog_pos[endogct, 0]
+        lmin1ct = endog_pos[endogct, 1]
+        
+        # Find optimal policy
+        best_val = -1e30
+        best_pol = 0
+        
         for polct in range(numendog):
-            for fcstct in range(kbarnum):
-                ev = 0.0
-                for exogprimct in range(numexog_next):
-                    ev += pr_mat[exogct, exogprimct] * V[polct, exogprimct, fcstct]
-                EV_mat[exogct, polct, fcstct] = ev
+            kprimect = endog_pos[polct, 0]
+            lct = endog_pos[polct, 1]
+            
+            # Period return
+            period_return = pfcstmat[act, sct, smin1ct, fcstct] * (
+                Ymat[zct, act, kct, lct]
+                - ACkmat[zct, act, kct, lct, kprimect]
+                - AClmat[exogct, kct, lct, lmin1ct, fcstct]
+                - Imat[kct, kprimect]
+                - WLmat[act, sct, smin1ct, fcstct, lct]
+            )
+            
+            # Total value
+            val = period_return + beta * EVmat[exogct, polct, fcstct]
+            
+            if val > best_val:
+                best_val = val
+                best_pol = polct
+        
+        V_new[endogct, exogct, fcstct] = best_val
+        polmat_new[endogct, exogct, fcstct] = best_pol
     
-    return EV_mat
+    return V_new, polmat_new
 
 
 def solve_vfi(
     params: ModelParameters,
     grids: StateGrids,
-    adj_calc: AdjustmentCostCalculator,
-    price: float = 1.34,
-    w: float = None,
+    fcst_mats: ForecastMatrices = None,
     max_iter: int = None,
     tol: float = None,
     verbose: bool = True
@@ -124,13 +428,14 @@ def solve_vfi(
     """
     Solve firm value function via policy iteration with Howard acceleration.
     
-    This implements the algorithm from VOL_GROWTH_wrapper.f90:
+    This implements the algorithm from VOL_GROWTH_wrapper.f90 exactly:
     
     1. Initialize V and policies
     2. For each VFI iteration:
        a. Howard acceleration: Evaluate Bellman with fixed policies (accelmaxit times)
-       b. Optimization: Find optimal policies for each state
-       c. Check convergence
+       b. Compute EVmat for all state-policy combinations
+       c. Optimization: Find optimal policies for each state
+       d. Check convergence on policy function
     
     Parameters
     ----------
@@ -138,12 +443,8 @@ def solve_vfi(
         Model parameters.
     grids : StateGrids
         State grids container.
-    adj_calc : AdjustmentCostCalculator
-        Adjustment cost calculator.
-    price : float
-        Output price.
-    w : float, optional
-        Wage rate. If None, computed as theta/price.
+    fcst_mats : ForecastMatrices, optional
+        Forecast matrices. If None, initializes with defaults.
     max_iter : int, optional
         Max VFI iterations. Default from params.vfmaxit.
     tol : float, optional
@@ -154,7 +455,7 @@ def solve_vfi(
     Returns
     -------
     VFISolution
-        Solution container with V and policies.
+        Solution container with V, policies, and convergence info.
     """
     p = params
     g = grids
@@ -164,16 +465,16 @@ def solve_vfi(
         max_iter = p.vfmaxit
     if tol is None:
         tol = p.vferrortol
-    if w is None:
-        w = p.theta / price  # From labor supply: w = theta/p
+    if fcst_mats is None:
+        fcst_mats = initialize_forecast_matrices(params, grids)
     
-    # Initialize
+    # Dimensions
     numendog = g.numendog
     numexog = g.numexog
     kbarnum = p.kbarnum
     numexog_next = g.pr_mat_full.shape[1]
     
-    # Value function and policies
+    # Initialize (Fortran lines 795-801)
     V = np.zeros((numendog, numexog, kbarnum))
     V_old = np.zeros_like(V)
     polmat = np.zeros((numendog, numexog, kbarnum), dtype=np.int64)
@@ -181,11 +482,16 @@ def solve_vfi(
     
     # Initialize policies to middle of grid
     polmat[:, :, :] = numendog // 2
+    polmat_old[:, :, :] = numendog // 2
     
-    # Pre-compute period returns for all states and policies
+    # Build return matrices
     if verbose:
-        print("Pre-computing returns matrix...")
-    returns_matrix = _compute_returns_matrix_full(params, grids, adj_calc, price, w)
+        print("Building return matrices...")
+    
+    adj_calc = AdjustmentCostCalculator(params, grids)
+    Ymat, Imat, ACkmat, AClmat, WLmat = build_return_matrices(
+        params, grids, adj_calc, fcst_mats
+    )
     
     if verbose:
         print("Starting VFI...")
@@ -194,45 +500,67 @@ def solve_vfi(
         print(f"  Howard acceleration: {p.accelmaxit} steps per VFI iteration")
     
     converged = False
+    vf_error = 0.0
+    pol_error = 0.0
+    
     for vf_iter in range(max_iter):
         
         # =====================
         # Howard Acceleration Step
         # =====================
-        V = _howard_acceleration_step(
-            V, polmat, returns_matrix, g.pr_mat_full,
-            p.beta, numendog, numexog, kbarnum, numexog_next, p.accelmaxit
+        V = howard_acceleration_step(
+            V, polmat_old,
+            Ymat, Imat, ACkmat, AClmat, WLmat,
+            fcst_mats.pfcstmat,
+            fcst_mats.kbarfcstinds,
+            fcst_mats.kbarfcstweights,
+            g.pr_mat_full,
+            g.exog_pos,
+            g.endog_pos,
+            p.beta,
+            numendog, numexog, kbarnum, numexog_next, p.accelmaxit,
+            p.znum, p.anum, p.knum, p.lnum, p.snum
         )
         
         # =====================
-        # Compute Expected Values
+        # Compute EVmat
         # =====================
-        EV_mat = _compute_ev_matrix(
-            V, g.pr_mat_full, numendog, numexog, kbarnum, numexog_next
+        EVmat = compute_ev_matrix(
+            V, g.pr_mat_full,
+            fcst_mats.kbarfcstinds,
+            fcst_mats.kbarfcstweights,
+            g.exog_pos,
+            numendog, numexog, kbarnum, numexog_next,
+            p.anum, p.snum
         )
         
         # =====================
         # Optimization Step
         # =====================
-        V_new, polmat_new = _optimization_step_numba(
-            returns_matrix, EV_mat, p.beta, numendog, numexog, kbarnum
+        V_new, polmat_new = optimization_step(
+            Ymat, Imat, ACkmat, AClmat, WLmat,
+            fcst_mats.pfcstmat,
+            EVmat,
+            g.exog_pos, g.endog_pos,
+            p.beta,
+            numendog, numexog, kbarnum,
+            p.znum, p.anum, p.knum, p.lnum
         )
         
         # =====================
         # Check Convergence
         # =====================
         vf_error = np.max(np.abs(V_new - V))
-        pol_error = np.max(np.abs(polmat_new - polmat))
+        pol_error = np.max(np.abs(polmat_new - polmat_old))
         
-        if verbose and (vf_iter + 1) % 5 == 0:
-            print(f"  VFI iter {vf_iter + 1}: VF error = {vf_error:.2e}, Policy error = {pol_error:.2e}")
+        if verbose:
+            print(f"  VFI iter {vf_iter + 1}: VF error = {vf_error:.6f}, Policy error = {pol_error:.6f}")
         
         # Update
         V = V_new
-        polmat_old = polmat.copy()
         polmat = polmat_new
         
-        # Convergence check (matching Fortran: exit on policy convergence)
+        # Convergence check (Fortran line 957: exit on policy convergence)
         if pol_error < tol:
             converged = True
             if verbose:
@@ -240,8 +568,9 @@ def solve_vfi(
             break
         
         V_old = V.copy()
+        polmat_old = polmat.copy()
     
-    # Extract individual policies
+    # Check for grid boundary hits (Fortran lines 987-1005)
     kprime_pos = np.zeros_like(polmat)
     lpol_pos = np.zeros_like(polmat)
     
@@ -252,120 +581,27 @@ def solve_vfi(
                 kprime_pos[endogct, exogct, fcstct] = g.endog_pos[pol_idx, 0]
                 lpol_pos[endogct, exogct, fcstct] = g.endog_pos[pol_idx, 1]
     
+    if verbose:
+        if np.max(kprime_pos) == p.knum - 1:
+            print("  Warning: Hit top of capital grid")
+        if np.min(kprime_pos) == 0:
+            print("  Warning: Hit bottom of capital grid")
+        if np.max(lpol_pos) == p.lnum - 1:
+            print("  Warning: Hit top of labor grid")
+        if np.min(lpol_pos) == 0:
+            print("  Warning: Hit bottom of labor grid")
+    
     return VFISolution(
         V=V,
         polmat=polmat,
         kprime_pos=kprime_pos,
         lpol_pos=lpol_pos,
+        EVmat=EVmat,
         converged=converged,
         iterations=vf_iter + 1,
         vf_error=vf_error,
         pol_error=pol_error
     )
-
-
-def _compute_returns_matrix_full(
-    params: ModelParameters,
-    grids: StateGrids,
-    adj_calc: AdjustmentCostCalculator,
-    price: float,
-    w: float
-) -> np.ndarray:
-    """
-    Pre-compute period returns for all states and policy choices.
-    
-    Returns matrix has shape (numendog, numexog, kbarnum, numendog)
-    where the last dimension is the policy choice.
-    
-    R(s, s', a, a', k, l, k', l') = p * (Y - ACk - ACl - I - w*l')
-    """
-    p = params
-    g = grids
-    
-    numendog = g.numendog
-    numexog = g.numexog
-    kbarnum = p.kbarnum
-    
-    # Shape: (numendog, numexog, kbarnum, numendog)
-    returns_matrix = np.zeros((numendog, numexog, kbarnum, numendog))
-    
-    # Pre-compute components
-    Y_mat = adj_calc.Y_mat  # Shape: (znum, anum, knum, lnum)
-    I_mat = adj_calc.I_mat  # Shape: (knum, knum)
-    ACk_base = adj_calc.ACk_base  # Shape: (knum, knum)
-    
-    for endogct in range(numendog):
-        k_idx = g.endog_pos[endogct, 0]
-        l_idx = g.endog_pos[endogct, 1]
-        
-        for exogct in range(numexog):
-            z_idx = g.exog_pos[exogct, 0]
-            a_idx = g.exog_pos[exogct, 1]
-            
-            # Output for this state
-            Y = Y_mat[z_idx, a_idx, k_idx, l_idx]
-            
-            for fcstct in range(kbarnum):
-                for polct in range(numendog):
-                    k_prime_idx = g.endog_pos[polct, 0]
-                    l_prime_idx = g.endog_pos[polct, 1]
-                    
-                    # Capital adjustment cost
-                    ACk = ACk_base[k_idx, k_prime_idx]
-                    
-                    # Labor adjustment cost
-                    ACl = labor_adjustment_cost(
-                        g.l_grid[l_prime_idx], g.l_grid[l_idx], w,
-                        p.hirelin, p.firelin, p.labfix
-                    )
-                    
-                    # Investment
-                    I_val = I_mat[k_idx, k_prime_idx]
-                    
-                    # Wage bill
-                    WL = w * g.l_grid[l_prime_idx]
-                    
-                    # Period return
-                    returns_matrix[endogct, exogct, fcstct, polct] = price * (Y - ACk - ACl - I_val - WL)
-    
-    return returns_matrix
-
-
-@jit(nopython=True, parallel=True)
-def _optimization_step_numba(
-    returns_matrix: np.ndarray,
-    EV_mat: np.ndarray,
-    beta: float,
-    numendog: int,
-    numexog: int,
-    kbarnum: int
-) -> Tuple[np.ndarray, np.ndarray]:
-    """
-    Find optimal policies for each state.
-    
-    For each state, find policy that maximizes:
-    RHS[pol] = R(s, pol) + beta * EV[exog, pol, fcst]
-    """
-    V_new = np.zeros((numendog, numexog, kbarnum))
-    polmat_new = np.zeros((numendog, numexog, kbarnum), dtype=np.int64)
-    
-    for endogct in prange(numendog):
-        for exogct in range(numexog):
-            for fcstct in range(kbarnum):
-                # Find optimal policy
-                best_val = -1e20
-                best_pol = 0
-                
-                for polct in range(numendog):
-                    val = returns_matrix[endogct, exogct, fcstct, polct] + beta * EV_mat[exogct, polct, fcstct]
-                    if val > best_val:
-                        best_val = val
-                        best_pol = polct
-                
-                V_new[endogct, exogct, fcstct] = best_val
-                polmat_new[endogct, exogct, fcstct] = best_pol
-    
-    return V_new, polmat_new
 
 
 def solve_vfi_simplified(
@@ -380,24 +616,15 @@ def solve_vfi_simplified(
     """
     Simplified VFI for faster computation with Howard acceleration.
     
-    This version reduces dimensionality by:
-    1. Aggregating over z (using mean productivity)
-    2. Fixing aggregate state (a=1)
-    3. Using 2D state (k, sigma) instead of 5D
-    
-    Implements Howard acceleration:
-    1. Evaluate value function with fixed policies (howard_accel iterations)
-    2. Optimize policies once
-    3. Repeat until convergence
-    
-    This matches the Fortran approach more closely.
+    This version uses fixed price and wage (no GE iteration).
+    Useful for testing and IRF computation.
     
     Parameters
     ----------
     params : ModelParameters
     grids : StateGrids
     price : float
-        Output price.
+        Output price (fixed).
     max_iter : int
         Max VFI iterations (outer loop).
     tol : float
@@ -413,148 +640,10 @@ def solve_vfi_simplified(
     p = params
     g = grids
     
-    # Simplified state space: (k, sigma)
-    Nk = p.knum
-    Ns = p.snum
+    # Create simple forecast matrices with fixed price
+    fcst_mats = initialize_forecast_matrices(params, grids)
+    fcst_mats.pfcstmat[:, :, :, :] = price
+    fcst_mats.wfcstmat[:, :, :, :] = p.theta / price
     
-    # Value function and policy
-    V = np.zeros((Ns, Nk))
-    V_old = np.zeros_like(V)
-    k_policy = np.zeros((Ns, Nk), dtype=np.int64)
-    k_policy_old = np.zeros_like(k_policy, dtype=np.int64)
-    
-    # Wage from labor supply
-    w = p.theta / price
-    
-    # Aggregate state (fixed)
-    a_val = 1.0
-    z_val = 1.0
-    
-    if verbose:
-        print("Starting simplified VFI with Howard acceleration...")
-    
-    for iteration in range(max_iter):
-        
-        # =====================
-        # Howard Acceleration Step
-        # =====================
-        # Evaluate value function with fixed policies
-        for accel in range(howard_accel):
-            V_new = np.zeros_like(V)
-            
-            for s_idx in range(Ns):
-                for k_idx in range(Nk):
-                    k = g.k_grid[k_idx]
-                    k_prime_idx = k_policy[s_idx, k_idx]
-                    k_prime = g.k_grid[k_prime_idx]
-                    
-                    # Investment
-                    I = k_prime - (1 - p.deltak) * k
-                    
-                    # Output (simplified: fixed labor = 1)
-                    Y = output(z_val, a_val, k, 1.0, p.alpha, p.nu)
-                    
-                    # Capital adjustment cost (non-convex)
-                    ACk = capital_adjustment_cost(k_prime, k, p.capirrev, p.capfix, p.deltak)
-                    
-                    # Period profit
-                    profit = price * Y - ACk - I - w * 1.0
-                    
-                    # Expected continuation value
-                    EV = 0.0
-                    for s_prime_idx in range(Ns):
-                        prob = g.pr_mat_s[s_idx, s_prime_idx]
-                        EV += prob * V_old[s_prime_idx, k_prime_idx]
-                    
-                    V_new[s_idx, k_idx] = profit + p.beta * EV
-            
-            V_old = V_new.copy()
-        
-        # =====================
-        # Policy Optimization Step
-        # =====================
-        for s_idx in range(Ns):
-            for k_idx in range(Nk):
-                k = g.k_grid[k_idx]
-                
-                # Compute value for each k' choice
-                values = np.zeros(Nk)
-                
-                for kprime_idx in range(Nk):
-                    k_prime = g.k_grid[kprime_idx]
-                    
-                    # Investment
-                    I = k_prime - (1 - p.deltak) * k
-                    
-                    # Output (simplified: fixed labor = 1)
-                    Y = output(z_val, a_val, k, 1.0, p.alpha, p.nu)
-                    
-                    # Capital adjustment cost (non-convex)
-                    ACk = capital_adjustment_cost(k_prime, k, p.capirrev, p.capfix, p.deltak)
-                    
-                    # Period profit
-                    profit = price * Y - ACk - I - w * 1.0
-                    
-                    # Expected continuation value
-                    EV = 0.0
-                    for s_prime_idx in range(Ns):
-                        prob = g.pr_mat_s[s_idx, s_prime_idx]
-                        EV += prob * V_old[s_prime_idx, kprime_idx]
-                    
-                    values[kprime_idx] = profit + p.beta * EV
-                
-                # Find optimal k'
-                best_idx = np.argmax(values)
-                V[s_idx, k_idx] = values[best_idx]
-                k_policy[s_idx, k_idx] = best_idx
-        
-        # =====================
-        # Check Convergence
-        # =====================
-        vf_error = np.max(np.abs(V - V_old))
-        pol_error = np.max(np.abs(k_policy - k_policy_old))
-        
-        if verbose and (iteration + 1) % 5 == 0:
-            print(f"  Iteration {iteration + 1}: VF error = {vf_error:.2e}, Policy error = {pol_error:.2e}")
-        
-        # Update for next iteration
-        V_old = V.copy()
-        k_policy_old = k_policy.copy()
-        
-        # Convergence check
-        if pol_error < tol:
-            if verbose:
-                print(f"  Converged at iteration {iteration + 1}")
-            break
-    
-    # Package results
-    # Create dummy arrays for full solution
-    numendog = g.numendog
-    numexog = g.numexog
-    
-    V_full = np.zeros((numendog, numexog, p.kbarnum))
-    polmat_full = np.zeros((numendog, numexog, p.kbarnum), dtype=np.int64)
-    
-    # Map simplified solution to full (mapping k_idx -> endog_idx)
-    for endogct in range(numendog):
-        k_idx = g.endog_pos[endogct, 0]
-        for exogct in range(numexog):
-            s_idx = g.exog_pos[exogct, 2]
-            for fcstct in range(p.kbarnum):
-                V_full[endogct, exogct, fcstct] = V[s_idx, k_idx]
-                # Map k_policy to endog index
-                kprime_idx = k_policy[s_idx, k_idx]
-                # Use same l as current (simplified)
-                l_idx = g.endog_pos[endogct, 1]
-                polmat_full[endogct, exogct, fcstct] = kprime_idx * p.lnum + l_idx
-    
-    return VFISolution(
-        V=V_full,
-        polmat=polmat_full,
-        kprime_pos=polmat_full,  # Simplified
-        lpol_pos=np.zeros_like(polmat_full),
-        converged=(pol_error < tol),
-        iterations=iteration + 1,
-        vf_error=vf_error,
-        pol_error=pol_error
-    )
+    # Run full VFI
+    return solve_vfi(params, grids, fcst_mats, max_iter, tol, verbose)
