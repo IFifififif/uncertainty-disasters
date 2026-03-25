@@ -213,7 +213,9 @@ def simulate_firms_with_disasters(
         I_sim=I_sim,
         H_sim=np.zeros(T),
         ACk_sim=np.zeros(T),
-        ACl_sim=np.zeros(T),
+        ACl_sim=np.zeros(T),  # Labor adjustment costs
+        C_sim=Y_sim - I_sim,  # Consumption = Y - I
+        p_sim=np.full(T, params.pval),  # Fixed price
         a_sim=a_pos,
         s_sim=s_pos
     )
