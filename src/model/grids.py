@@ -95,13 +95,20 @@ def build_grids(params: ModelParameters) -> StateGrids:
     # =====================
     # Build Productivity Grids (Tauchen method)
     # =====================
+    # Idiosyncratic productivity z: log-space AR(1), meanshift = 0
     z_grid, pr_mat_z = build_tauchen_grid_with_sv(
-        p.zmin, p.zmax, p.znum, p.rhoz, sigmaz_grid, p.snum
+        p.zmin, p.zmax, p.znum, p.rhoz, sigmaz_grid, p.snum,
+        meanshift=0.0
     )
     
+    # Aggregate productivity a: level-space AR(1)
+    # Calculate meanshift to undo disaster-induced mean impact
+    # Fortran: meanshifta = -sum(sigmaa*DISASTERprobs*DISASTERlev) - highuncerg*firstsecondprob*log(amin)
+    # For simplicity, we use meanshift = 0 here (can be adjusted during GMM estimation)
     a_grid = np.linspace(p.amin, p.amax, p.anum)
     pr_mat_a = build_tauchen_transition_sv(
-        a_grid, p.anum, p.rhoa, sigmaa_grid, p.snum
+        a_grid, p.anum, p.rhoa, sigmaa_grid, p.snum,
+        meanshift=0.0  # Base case; adjusted during simulation
     )
     
     # =====================
@@ -176,10 +183,13 @@ def build_grids(params: ModelParameters) -> StateGrids:
 
 def build_tauchen_grid_with_sv(
     zmin: float, zmax: float, znum: int, 
-    rho: float, sigma_grid: np.ndarray, snum: int
+    rho: float, sigma_grid: np.ndarray, snum: int,
+    meanshift: float = 0.0
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
     Build productivity grid using Tauchen method with stochastic volatility.
+    
+    Matches Fortran `unctauchen` subroutine exactly.
     
     Parameters
     ----------
@@ -190,9 +200,11 @@ def build_tauchen_grid_with_sv(
     rho : float
         Autocorrelation.
     sigma_grid : np.ndarray
-        Volatility levels for each state.
+        Volatility levels for each state (unconditional std in log space).
     snum : int
         Number of volatility states.
+    meanshift : float
+        Mean shift adjustment (for aggregate productivity only).
     
     Returns
     -------
@@ -201,37 +213,40 @@ def build_tauchen_grid_with_sv(
     pr_mat : np.ndarray
         Transition matrix, shape (znum, znum, snum).
     """
-    # Build grid in log space
+    # Build grid in log space (Fortran: call linspace(log_grid,log(zmin),log(zmax),znum))
     log_grid = np.linspace(np.log(zmin), np.log(zmax), znum)
     z_grid = np.exp(log_grid)
+    
+    # Grid spacing (Fortran: gridinc = log_grid(2)-log_grid(1))
+    gridinc = log_grid[1] - log_grid[0]
     
     # Build transition matrix for each volatility state
     pr_mat = np.zeros((znum, znum, snum))
     
     for s in range(snum):
-        sigma = sigma_grid[s]
-        sigma_e = sigma * np.sqrt(1 - rho**2)  # Innovation std
+        # Fortran uses sigma_grid directly as the std dev in normcdf
+        # This matches the Fortran unctauchen implementation
+        standdev = sigma_grid[s]
         
         for i in range(znum):
-            mu = rho * log_grid[i]
+            # Conditional mean: rho * log_grid[i] + meanshift
+            # Fortran: rho*log_grid(zct)+meanshift
+            mu = rho * log_grid[i] + meanshift
             
-            for j in range(znum):
-                if j == 0:
-                    pr_mat[i, j, s] = norm.cdf(
-                        log_grid[j] + (log_grid[j+1] - log_grid[j]) / 2,
-                        mu, sigma_e
-                    )
-                elif j == znum - 1:
-                    pr_mat[i, j, s] = 1 - norm.cdf(
-                        log_grid[j] - (log_grid[j] - log_grid[j-1]) / 2,
-                        mu, sigma_e
-                    )
-                else:
-                    lower = log_grid[j] - (log_grid[j] - log_grid[j-1]) / 2
-                    upper = log_grid[j] + (log_grid[j+1] - log_grid[j]) / 2
-                    pr_mat[i, j, s] = norm.cdf(upper, mu, sigma_e) - norm.cdf(lower, mu, sigma_e)
+            # Middle intervals (zprimect = 2 to znum-1)
+            for j in range(1, znum - 1):
+                pr_mat[i, j, s] = (
+                    norm.cdf(log_grid[j] + gridinc / 2, mu, standdev) -
+                    norm.cdf(log_grid[j] - gridinc / 2, mu, standdev)
+                )
             
-            # Normalize to sum to 1
+            # First interval (Fortran: transarray(zct,1,sct))
+            pr_mat[i, 0, s] = norm.cdf(log_grid[0] + gridinc / 2, mu, standdev)
+            
+            # Last interval (Fortran: transarray(zct,znum,sct))
+            pr_mat[i, znum - 1, s] = 1 - norm.cdf(log_grid[znum - 1] - gridinc / 2, mu, standdev)
+            
+            # Normalize to sum to 1 (Fortran: transarray(zct,:,sct) = transarray(zct,:,sct) / sum(transarray(zct,:,sct)))
             pr_mat[i, :, s] /= pr_mat[i, :, s].sum()
     
     return z_grid, pr_mat
@@ -239,23 +254,28 @@ def build_tauchen_grid_with_sv(
 
 def build_tauchen_transition_sv(
     a_grid: np.ndarray, anum: int, rho: float,
-    sigma_grid: np.ndarray, snum: int
+    sigma_grid: np.ndarray, snum: int,
+    meanshift: float = 0.0
 ) -> np.ndarray:
     """
     Build transition matrix for aggregate productivity with stochastic volatility.
     
+    Matches Fortran `unctauchen` subroutine for level-space grid.
+    
     Parameters
     ----------
     a_grid : np.ndarray
-        Productivity grid.
+        Productivity grid (in level space, not log space).
     anum : int
         Number of grid points.
     rho : float
         Autocorrelation.
     sigma_grid : np.ndarray
-        Volatility levels.
+        Volatility levels for each state.
     snum : int
         Number of volatility states.
+    meanshift : float
+        Mean shift adjustment for disaster-induced mean impact.
     
     Returns
     -------
@@ -264,29 +284,31 @@ def build_tauchen_transition_sv(
     """
     pr_mat = np.zeros((anum, anum, snum))
     
+    # Grid spacing (uniform in level space)
+    gridinc = a_grid[1] - a_grid[0]
+    
     for s in range(snum):
-        sigma = sigma_grid[s]
-        sigma_e = sigma * np.sqrt(1 - rho**2)
+        # Fortran uses sigma_grid directly as the std dev
+        standdev = sigma_grid[s]
         
         for i in range(anum):
-            mu = rho * a_grid[i]
+            # Conditional mean: rho * a_grid[i] + meanshift
+            mu = rho * a_grid[i] + meanshift
             
-            for j in range(anum):
-                if j == 0:
-                    pr_mat[i, j, s] = norm.cdf(
-                        a_grid[j] + (a_grid[j+1] - a_grid[j]) / 2,
-                        mu, sigma_e
-                    )
-                elif j == anum - 1:
-                    pr_mat[i, j, s] = 1 - norm.cdf(
-                        a_grid[j] - (a_grid[j] - a_grid[j-1]) / 2,
-                        mu, sigma_e
-                    )
-                else:
-                    lower = a_grid[j] - (a_grid[j] - a_grid[j-1]) / 2
-                    upper = a_grid[j] + (a_grid[j+1] - a_grid[j]) / 2
-                    pr_mat[i, j, s] = norm.cdf(upper, mu, sigma_e) - norm.cdf(lower, mu, sigma_e)
+            # Middle intervals
+            for j in range(1, anum - 1):
+                pr_mat[i, j, s] = (
+                    norm.cdf(a_grid[j] + gridinc / 2, mu, standdev) -
+                    norm.cdf(a_grid[j] - gridinc / 2, mu, standdev)
+                )
             
+            # First interval
+            pr_mat[i, 0, s] = norm.cdf(a_grid[0] + gridinc / 2, mu, standdev)
+            
+            # Last interval
+            pr_mat[i, anum - 1, s] = 1 - norm.cdf(a_grid[anum - 1] - gridinc / 2, mu, standdev)
+            
+            # Normalize
             pr_mat[i, :, s] /= pr_mat[i, :, s].sum()
     
     return pr_mat

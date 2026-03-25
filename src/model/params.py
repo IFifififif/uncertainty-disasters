@@ -78,14 +78,14 @@ class ModelParameters:
     sigmaa: float = 0.00668420914017636
     
     # =====================
-    # Grid Sizes (simplified mode for faster computation)
+    # Grid Sizes (full mode matching Fortran VOL_GROWTH_wrapper.f90)
     # =====================
-    znum: int = 5          # Idiosyncratic productivity states (full: 9)
-    anum: int = 7          # Aggregate productivity states (full: 21)
-    snum: int = 2          # Volatility states (always 2)
-    knum: int = 30         # Capital grid (full: 150)
-    lnum: int = 15         # Labor grid (full: 75)
-    kbarnum: int = 2       # Aggregate capital forecast grid
+    znum: int = 9          # Idiosyncratic productivity states (Fortran: znum = 9)
+    anum: int = 21         # Aggregate productivity states (Fortran: anum = 21)
+    snum: int = 2          # Volatility states (always 2, Fortran: snum = 2)
+    knum: int = 150        # Capital grid (Fortran: knum = 150)
+    lnum: int = 75         # Labor grid (Fortran: lnum = 75)
+    kbarnum: int = 2       # Aggregate capital forecast grid (Fortran: kbarnum = 2)
     
     # =====================
     # Grid Bounds
@@ -272,22 +272,28 @@ class ModelParameters:
         return lb, ub
 
 
-def create_params(simplified: bool = True) -> ModelParameters:
+def create_params(simplified: bool = False) -> ModelParameters:
     """
     Create parameter set with appropriate grid sizes.
     
     Parameters
     ----------
     simplified : bool
-        If True, use smaller grids for faster computation.
-        If False, use full grid sizes matching Fortran.
+        If True, use smaller grids for faster computation (testing).
+        If False (default), use full grid sizes matching Fortran.
+    
+    Returns
+    -------
+    ModelParameters
+        Parameter set with appropriate grid sizes.
     """
     if simplified:
-        return ModelParameters()
-    else:
         return ModelParameters(
-            znum=9,
-            anum=21,
-            knum=150,
-            lnum=75
+            znum=5,
+            anum=7,
+            knum=30,
+            lnum=15
         )
+    else:
+        # Full grid sizes matching Fortran VOL_GROWTH_wrapper.f90
+        return ModelParameters()
