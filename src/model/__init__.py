@@ -13,6 +13,7 @@ Main Classes:
 - StateGrids: State space grids and transition matrices
 - VFISolution: Value function iteration results
 - GMMSolution: GMM estimation results
+- GESolver: General equilibrium solver
 
 Main Functions:
 - build_grids(): Build state space
@@ -45,8 +46,22 @@ from .adjustment import (
 
 from .vfi import (
     VFISolution,
+    ForecastMatrices,
     solve_vfi,
-    solve_vfi_simplified
+    solve_vfi_simplified,
+    initialize_forecast_matrices
+)
+
+from .ge_solver import (
+    DistributionState,
+    Aggregates,
+    GESolver,
+    initialize_distribution,
+    compute_aggregates,
+    compute_consumption,
+    compute_excess_demand,
+    find_market_clearing_price,
+    evolve_distribution
 )
 
 from .simulation import (
@@ -96,12 +111,16 @@ __all__ = [
     'ModelParameters',
     'StateGrids',
     'VFISolution',
+    'ForecastMatrices',
     'GMMSolution',
     'SimulationResults',
     'IRFResults',
     'IVResults',
     'PSOConfig',
     'PSOResult',
+    'DistributionState',
+    'Aggregates',
+    'GESolver',
     
     # Parameters
     'create_params',
@@ -122,6 +141,15 @@ __all__ = [
     # VFI
     'solve_vfi',
     'solve_vfi_simplified',
+    'initialize_forecast_matrices',
+    
+    # GE Solver
+    'initialize_distribution',
+    'compute_aggregates',
+    'compute_consumption',
+    'compute_excess_demand',
+    'find_market_clearing_price',
+    'evolve_distribution',
     
     # Simulation
     'simulate_firms',
