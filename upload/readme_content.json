@@ -1,0 +1,18 @@
+{
+  "code": 200,
+  "data": {
+    "description": "",
+    "html": "<html><head><meta name=\"color-scheme\" content=\"light dark\"></head><body><pre style=\"word-wrap: break-word; white-space: pre-wrap;\"># Using Disasters to Estimate the Impact of Uncertainty\n\nPython replication of Baker, Bloom, and Terry (2024), *Review of Economic Studies* 91, 720–747.\n\n## Overview\n\nThis project provides a complete Python reproduction of the original codebase (Stata + MATLAB + Fortran), replicating all tables and figures from the paper bit-for-bit.\n\n### Modules\n\n| Module | Original | Python | Output |\n|--------|----------|--------|--------|\n| **IV** | Stata | `src/iv/` | Tables 1–6 |\n| **IV_VAR** | MATLAB | `src/iv_var/` | Figures 6–7 |\n| **LMN_VAR** | Stata + MATLAB | `src/lmn_var/` | Figures 3–5 |\n| **MODEL** | Fortran 90 | `src/model/` | Figure 8 |\n\n## Setup\n\n```bash\n# Create virtual environment\npython -m venv .venv\nsource .venv/bin/activate\n\n# Install dependencies\npip install -r requirements.txt\n```\n\n## Usage\n\n### IV Panel Regressions (Tables 1–6)\n```bash\npython -m src.iv.panel_iv\n```\n\n### IV-VAR Estimation (Figures 6–7)\n```bash\npython -m src.iv_var.run_estimation\n```\n\n### LMN VAR (Figures 3–5)\n```bash\npython -m src.lmn_var.run_estimation\n```\n\n### Model Simulation (Figure 8)\n```bash\npython -m src.model.run_simulation\n```\n\n## Project Structure\n\n```\n├── data/\n│   ├── IV/              # Panel IV data (.dta)\n│   ├── IV_VAR/          # IV-VAR data (.csv)\n│   ├── LMN_VAR/         # LMN VAR data (.dta)\n│   └── MODEL/\n├── src/\n│   ├── iv/              # Panel IV regressions\n│   ├── iv_var/          # IV-VAR estimation\n│   ├── lmn_var/         # Disaster event restrictions VAR\n│   ├── model/           # Micro-macro model\n│   └── utils/           # Shared utilities\n├── output/\n│   ├── tables/\n│   └── figures/\n├── tests/\n├── requirements.txt\n└── README.md\n```\n\n## Reference\n\nBaker, S. R., Bloom, N., & Terry, S. J. (2024). Using Disasters to Estimate the Impact of Uncertainty. *The Review of Economic Studies*, 91(2), 720–747. https://doi.org/10.1093/restud/rdad036\n\n## License\n\nThis replication code is provided for academic research purposes. Original code © Scott R. Baker, Nicholas Bloom, and Stephen J. Terry.\n</pre></body></html>",
+    "title": "",
+    "url": "https://raw.githubusercontent.com/IFifififif/uncertainty-disasters/main/README.md",
+    "usage": {
+      "tokens": 643
+    }
+  },
+  "meta": {
+    "usage": {
+      "tokens": 643
+    }
+  },
+  "status": 20000
+}
