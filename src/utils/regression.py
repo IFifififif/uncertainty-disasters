@@ -243,10 +243,25 @@ def iv2sls_with_cluster_se(
     first_stage_results = []
     X_hat_list = []
 
+    # Check for and remove constant/near-constant columns in W
+    W_stds = np.std(W, axis=0)
+    valid_cols = W_stds > 1e-10
+    if not np.all(valid_cols):
+        # Keep only non-constant columns
+        W = W[:, valid_cols]
+        removed_count = np.sum(~valid_cols)
+        if removed_count > 0:
+            import warnings
+            warnings.warn(f"Removed {removed_count} constant instrument(s) after partialling out FE")
+
     for j in range(L_endog):
-        # OLS of X_endog_j on W
+        # OLS of X_endog_j on W using pseudo-inverse for numerical stability
         WtW = W.T @ W
-        WtW_inv = np.linalg.inv(WtW)
+        try:
+            WtW_inv = np.linalg.inv(WtW)
+        except np.linalg.LinAlgError:
+            # Use pseudo-inverse if matrix is singular
+            WtW_inv = np.linalg.pinv(WtW)
         pi_j = WtW_inv @ (W.T @ X_endog_res[:, j])
         X_hat_j = W @ pi_j
         X_hat_list.append(X_hat_j)
@@ -289,11 +304,16 @@ def iv2sls_with_cluster_se(
     # Hansen J statistic (overidentification test)
     # J = N * e' P_Z e / (e'e/N)
     e = result['residuals']
-    Pz = W @ np.linalg.inv(W.T @ W) @ W.T
+    try:
+        Pz = W @ np.linalg.inv(W.T @ W) @ W.T
+    except np.linalg.LinAlgError:
+        Pz = W @ np.linalg.pinv(W.T @ W) @ W.T
     e_Pz_e = e.T @ Pz @ e
     e_e = e.T @ e
     J_stat = N * e_Pz_e / (e_e / N)
-    n_overid = Z_res.shape[1] - L_endog
+    # Use the actual number of instruments used (after removing constants)
+    n_instr_used = W.shape[1]
+    n_overid = n_instr_used - L_endog
     if n_overid > 0:
         from scipy.stats import chi2
         J_pval = 1 - chi2.cdf(J_stat, n_overid)
