@@ -36,15 +36,46 @@ class PanelIV:
     - ivreg2 for IV estimation with cluster-robust SEs
     - cc* for country dummies, yy* for time dummies
     - partial(yy* cc*) to partial out FE in IV
+
+    Paper description (p.728):
+    "The first-and second-moment series are scaled for comparability across 
+    columns to have residualized unit standard deviation over the regression sample."
+    
+    This means variables should be scaled so that after partialling out FE,
+    they have unit standard deviation.
     """
 
-    def __init__(self, data_path: str = None):
+    def __init__(self, data_path: str = None, standardize_residualized: str = 'none'):
+        """
+        Initialize Panel IV regressions.
+        
+        Parameters
+        ----------
+        data_path : str, optional
+            Path to the Stata data file.
+        standardize_residualized : str, optional
+            How to scale variables:
+            - 'none': No scaling (default)
+            - 'semi': Scale X to residualized unit std, y unchanged
+            - 'full': Scale both X and y to residualized unit std (beta coefficients)
+        
+        Paper (p.728): "The first-and second-moment series are scaled for 
+        comparability across columns to have residualized unit standard deviation 
+        over the regression sample."
+        """
         if data_path is None:
             data_path = PROJECT_ROOT / "data" / "IV" / "panel_iv_data.dta"
         self.data_path = Path(data_path)
         self.df = None
         self.output_dir = PROJECT_ROOT / "output" / "tables"
         self.output_dir.mkdir(parents=True, exist_ok=True)
+        
+        # How to scale variables to residualized unit standard deviation
+        # 'none': No scaling
+        # 'semi': Scale X only (semi-standardized)
+        # 'full': Scale both X and y (beta coefficients)
+        self.standardize_residualized = standardize_residualized
+        self._resid_stds = {}  # Store residualized stds for reporting
 
         # IV instrument sets (matching Stata globals)
         self.iv = [
@@ -83,6 +114,43 @@ class PanelIV:
         partial = np.hstack([cc_arr, yy_arr])
         return partial, cc_cols, yy_cols
 
+    def _compute_residualized_std(self, x: np.ndarray, partial: np.ndarray) -> float:
+        """
+        Compute residualized standard deviation.
+        
+        Paper (p.728): "scaled to have residualized unit standard deviation"
+        This means: std(x - Px @ x) where P is the projection matrix for FE.
+        """
+        # QR decomposition for numerical stability
+        Q, R = np.linalg.qr(partial, mode='reduced')
+        diag_R = np.abs(np.diag(R))
+        rank = np.sum(diag_R > 1e-10 * diag_R[0])
+        Q_rank = Q[:, :rank]
+        Px = Q_rank @ Q_rank.T
+        
+        # Residualize
+        x_resid = x - Px @ x
+        return np.std(x_resid)
+
+    def _scale_to_residualized_unit_std(
+        self, 
+        x: np.ndarray, 
+        partial: np.ndarray,
+        var_name: str = None
+    ) -> tuple:
+        """
+        Scale variable to have residualized unit standard deviation.
+        
+        Returns: (x_scaled, residualized_std)
+        """
+        rstd = self._compute_residualized_std(x, partial)
+        if var_name:
+            self._resid_stds[var_name] = rstd
+        if rstd > 1e-10:
+            return x / rstd, rstd
+        else:
+            return x, rstd
+
     def _prepare_iv_regression(
         self,
         df: pd.DataFrame,
@@ -95,6 +163,9 @@ class PanelIV:
         Prepare data for IV regression.
 
         Handles missing values, builds arrays for iv2sls.
+        
+        If self.standardize_residualized is True, scales endogenous variables
+        to have residualized unit standard deviation (matching paper description).
         """
         data = df.copy()
         if sample_filter is not None:
@@ -116,6 +187,21 @@ class PanelIV:
 
         # Partial out FE (cc* and yy*)
         partial, _, _ = self._get_fe_arrays(data)
+        
+        # Scale to residualized unit std if requested
+        # Paper (p.728): "scaled to have residualized unit standard deviation"
+        if self.standardize_residualized in ['semi', 'full']:
+            # Scale y (only for 'full' mode)
+            if self.standardize_residualized == 'full':
+                y, y_rstd = self._scale_to_residualized_unit_std(y, partial, 'ydgdp')
+            
+            # Scale each endogenous variable (for both 'semi' and 'full')
+            X_endog_scaled = np.zeros_like(X_endog)
+            for i, var in enumerate(endog_vars):
+                X_endog_scaled[:, i], _ = self._scale_to_residualized_unit_std(
+                    X_endog[:, i], partial, var
+                )
+            X_endog = X_endog_scaled
 
         return y, X_endog, Z, clusters, partial, data
 
