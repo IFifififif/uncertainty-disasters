@@ -302,18 +302,48 @@ def iv2sls_with_cluster_se(
     se_endog = result['se'][n_exog:]
 
     # Hansen J statistic (overidentification test)
-    # J = N * e' P_Z e / (e'e/N)
-    e = result['residuals']
+    # IMPORTANT: Use residuals computed with ORIGINAL endogenous variables,
+    # NOT with the fitted values X_hat from the first stage.
+    # The correct residual is e = y - X_endog @ beta, NOT e = y - X_hat @ beta
+    # 
+    # For cluster-robust Hansen J, we use the GMM form:
+    # J = e' @ Z @ V^{-1} @ Z' @ e
+    # where V = sum_c (Z_c' @ e_c) @ (Z_c' @ e_c)' is the cluster-robust variance
+    
+    # Compute correct residuals using original endogenous variables
+    if X_exog_res.shape[1] > 0:
+        e = y_res - np.hstack([X_exog_res, X_endog_res]) @ result['coef']
+    else:
+        e = y_res - X_endog_res @ coef_endog
+    
+    # Cluster-robust Hansen J statistic
+    # Following Stata ivreg2 implementation for cluster-robust case
+    unique_clusters = np.unique(clusters)
+    n_clusters = len(unique_clusters)
+    L = W.shape[1]  # number of instruments
+    
+    # Compute cluster-robust variance matrix of moment conditions
+    # V = sum_c (Z_c' @ e_c) @ (Z_c' @ e_c)'
+    V_cluster = np.zeros((L, L))
+    for c in unique_clusters:
+        mask = clusters == c
+        Wc = W[mask]
+        ec = e[mask]
+        g_c = Wc.T @ ec  # moment condition for this cluster
+        V_cluster += np.outer(g_c, g_c)
+    
+    # Hansen J = e' @ W @ V^{-1} @ W' @ e
     try:
-        Pz = W @ np.linalg.inv(W.T @ W) @ W.T
+        V_inv = np.linalg.inv(V_cluster)
     except np.linalg.LinAlgError:
-        Pz = W @ np.linalg.pinv(W.T @ W) @ W.T
-    e_Pz_e = e.T @ Pz @ e
-    e_e = e.T @ e
-    J_stat = N * e_Pz_e / (e_e / N)
-    # Use the actual number of instruments used (after removing constants)
+        V_inv = np.linalg.pinv(V_cluster)
+    
+    J_stat = e.T @ W @ V_inv @ W.T @ e
+    
+    # Degrees of freedom: number of overidentifying restrictions
     n_instr_used = W.shape[1]
     n_overid = n_instr_used - L_endog
+    
     if n_overid > 0:
         from scipy.stats import chi2
         J_pval = 1 - chi2.cdf(J_stat, n_overid)

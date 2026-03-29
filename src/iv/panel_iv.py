@@ -152,15 +152,22 @@ class PanelIV:
 
     def _run_areg(self, sample_filter=None):
         """
-        Run OLS with country FE matching Stata's areg.
+        Run OLS with country and period FE matching Stata's areg.
 
-        areg ydgdp cs_index_ret cs_index_vol i.yq_int, ab(country) cluster(country)
+        Stata: areg ydgdp cs_index_ret cs_index_vol i.yq_int, ab(country) cluster(country)
+
+        This includes BOTH:
+        - Period FE (i.yq_int) - explicit dummies for each period
+        - Country FE (ab(country)) - absorbed (demeaned)
+
+        We use iterative demeaning (Frisch-Waugh-Lovell) for two-way FE.
         """
         data = self.df.copy()
         if sample_filter is not None:
             data = data[sample_filter].copy()
 
-        vars_needed = ['ydgdp', 'cs_index_ret', 'cs_index_vol', 'country']
+        # Need yq_int for period FE
+        vars_needed = ['ydgdp', 'cs_index_ret', 'cs_index_vol', 'country', 'yq_int']
         valid = data[vars_needed].notna().all(axis=1)
         data = data[valid].copy()
 
@@ -170,15 +177,35 @@ class PanelIV:
             data['cs_index_vol'].values.astype(np.float64),
         ])
         clusters = data['country'].values
-
-        # Demean by country (areg absorbs country FE)
         country_groups = data['country'].values
-        unique_countries = np.unique(country_groups)
+        period_groups = data['yq_int'].values
 
-        for c in unique_countries:
-            mask = country_groups == c
-            y[mask] -= y[mask].mean()
-            X[mask] -= X[mask].mean(axis=0)
+        # Two-way FE: iterative demeaning (Frisch-Waugh-Lovell)
+        # Demean by country first, then by period, iterate until convergence
+        unique_countries = np.unique(country_groups)
+        unique_periods = np.unique(period_groups)
+
+        max_iter = 100
+        tol = 1e-10
+        for iteration in range(max_iter):
+            y_old = y.copy()
+            X_old = X.copy()
+
+            # Demean by country
+            for c in unique_countries:
+                mask = country_groups == c
+                y[mask] -= y[mask].mean()
+                X[mask] -= X[mask].mean(axis=0)
+
+            # Demean by period
+            for p in unique_periods:
+                mask = period_groups == p
+                y[mask] -= y[mask].mean()
+                X[mask] -= X[mask].mean(axis=0)
+
+            # Check convergence
+            if np.max(np.abs(y - y_old)) < tol and np.max(np.abs(X - X_old)) < tol:
+                break
 
         result = ols_with_cluster_se(y, X, clusters)
         return result, data
@@ -239,7 +266,7 @@ class PanelIV:
         TABLE 2: Baseline IV results.
 
         Columns:
-        1. OLS with country FE (areg)
+        1. OLS with country FE and period FE (areg with i.yq_int)
         2. IV - micro+macro (cs_index_ret, cs_index_vol)
         3. IV - stock index (l1avgret, l1lavgvol)
         4. IV - stock index, common sample
@@ -251,16 +278,16 @@ class PanelIV:
 
         results = {}
 
-        # Col 1: OLS with country FE
+        # Col 1: OLS with country FE and period FE
         print("\n--- Column 1: OLS (areg) ---")
         res1, data1 = self._run_areg()
         results['col1_ols'] = res1
         var_names = ['cs_index_ret', 'cs_index_vol']
         print(format_coef_table(
             res1['coef'], res1['se'], var_names,
-            title="Col 1: OLS with Country FE",
+            title="Col 1: OLS with Country FE and Period FE",
             nobs=res1['nobs'], nclusters=res1['nclusters'],
-            addtext={'Period FE': 'NO', 'Country FE': 'YES'}
+            addtext={'Period FE': 'YES', 'Country FE': 'YES'}
         ))
 
         # Col 2: IV - micro+macro
@@ -377,14 +404,14 @@ class PanelIV:
         res, _ = self._run_iv(
             endog_vars=['cs_index_ret', 'cs_index_vol'],
             instr_vars=self.iv,
-            cluster=False,
+            cluster=True,  # Stata: cluster(country)
         )
         results['col1_baseline'] = res
         print(format_coef_table(
             res['coef_endog'], res['se_endog'],
             ['cs_index_ret', 'cs_index_vol'],
             title="Col 1: Baseline",
-            nobs=res['nobs'],
+            nobs=res['nobs'], nclusters=res['nclusters'],
             addtext={'Period FE': 'YES', 'Country FE': 'YES',
                      'Hansen J pval': f"{res['J_pval']:.4f}" if not np.isnan(res['J_pval']) else 'N/A'}
         ))
