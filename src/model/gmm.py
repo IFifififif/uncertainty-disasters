@@ -137,8 +137,8 @@ def simulate_firms_with_disasters(
     # Disaster probabilities
     disaster_probs = np.array([0.242, 0.03, 0.011, 0.008])
     
-    # Initialize
-    np.random.seed(2501)
+    # CRITICAL FIX: Use RandomState matching Fortran's random_number
+    rng = np.random.RandomState(2501)
     
     # Exogenous states
     a_pos = np.zeros(T, dtype=int)
@@ -162,7 +162,7 @@ def simulate_firms_with_disasters(
     for t in range(T):
         # Check for disasters
         for d in range(4):
-            if np.random.random() < disaster_probs[d]:
+            if rng.random() < disaster_probs[d]:
                 disaster_occurred[t, d] = True
                 
                 # Apply disaster impact on productivity
@@ -170,7 +170,7 @@ def simulate_firms_with_disasters(
                 a_val = g.a_grid[a_pos[t]] * (1 + disaster_levels[d])
                 
                 # Maybe increase uncertainty
-                if np.random.random() < disaster_unc_probs[d]:
+                if rng.random() < disaster_unc_probs[d]:
                     s_pos[t] = 1
             else:
                 a_val = g.a_grid[a_pos[t]]
@@ -196,10 +196,10 @@ def simulate_firms_with_disasters(
         # Transition aggregate productivity
         if t < T - 1:
             trans_probs = g.pr_mat_a[a_pos[t], :, s_pos[t]]
-            a_pos[t+1] = np.searchsorted(np.cumsum(trans_probs), np.random.random())
+            a_pos[t+1] = np.searchsorted(np.cumsum(trans_probs), rng.random())
             
             # Uncertainty transition
-            if np.random.random() < g.pr_mat_s[s_pos[t], 1]:
+            if rng.random() < g.pr_mat_s[s_pos[t], 1]:
                 s_pos[t+1] = 1
             else:
                 s_pos[t+1] = 0

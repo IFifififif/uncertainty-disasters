@@ -83,8 +83,8 @@ def pso_optimize(
     nvar = len(lb)
     npart = config.npart
     
-    # Set random seed
-    np.random.seed(config.seed)
+    # CRITICAL FIX: Use RandomState matching Fortran's random_number
+    rng = np.random.RandomState(config.seed)
     
     # Constriction factor (ensures convergence)
     phi_sum = config.phi[0] + config.phi[1]
@@ -100,12 +100,12 @@ def pso_optimize(
     # Positions: uniform in [lb, ub]
     x_store = np.zeros((nvar, npart))
     for i in range(npart):
-        x_store[:, i] = lb + (ub - lb) * np.random.random(nvar)
+        x_store[:, i] = lb + (ub - lb) * rng.random(nvar)
     
     # Velocities: uniform in [-space_norm, space_norm]
     v_store = np.zeros((nvar, npart))
     for i in range(npart):
-        v_store[:, i] = space_norm * (2 * np.random.random(nvar) - 1)
+        v_store[:, i] = space_norm * (2 * rng.random(nvar) - 1)
     
     # Function values
     fx_store = np.zeros(npart)
@@ -134,9 +134,9 @@ def pso_optimize(
         
         # Update velocities and positions
         for i in range(npart):
-            # Random coefficients
-            r1 = np.random.random(nvar)
-            r2 = np.random.random(nvar)
+            # Random coefficients - CRITICAL FIX: use rng
+            r1 = rng.random(nvar)
+            r2 = rng.random(nvar)
             
             # Velocity update
             v_store[:, i] = chi * (

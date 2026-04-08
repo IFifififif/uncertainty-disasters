@@ -362,7 +362,8 @@ def simulate_iv_data(
     second_moment : np.ndarray
     instruments : np.ndarray
     """
-    np.random.seed(seed)
+    # CRITICAL FIX: Use RandomState matching Fortran's random_number
+    rng = np.random.RandomState(seed)
     
     # Initialize
     growth = np.zeros(T)
@@ -377,18 +378,18 @@ def simulate_iv_data(
     for t in range(T):
         # Check for disasters
         for d in range(4):
-            if np.random.random() < disaster_probs[d]:
+            if rng.random() < disaster_probs[d]:
                 instruments[t, d] = 1
                 
                 # Impact on growth
                 growth[t] += disaster_levels[d]
                 
                 # Impact on volatility
-                if np.random.random() < disaster_unc_probs[d]:
+                if rng.random() < disaster_unc_probs[d]:
                     second_moment[t] += 1  # High uncertainty indicator
         
         # Base growth
-        growth[t] += base_growth + np.random.normal(0, 0.01)
+        growth[t] += base_growth + rng.normal(0, 0.01)
         
         # First moment (normalized)
         first_moment[t] = growth[t] / np.std(growth)

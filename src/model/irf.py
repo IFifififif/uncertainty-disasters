@@ -432,7 +432,8 @@ def compute_model_moments(
     p = params
     g = grids
     
-    np.random.seed(seed)
+    # CRITICAL FIX: Use RandomState matching Fortran's random_number
+    rng = np.random.RandomState(seed)
     
     # Disaster probabilities
     disaster_probs = p.disaster_probs
@@ -453,23 +454,23 @@ def compute_model_moments(
     for t in range(T):
         # Check for disasters
         for d in range(4):
-            if np.random.random() < disaster_probs[d]:
+            if rng.random() < disaster_probs[d]:
                 disaster_indicators[t, d] = True
                 
                 # Maybe trigger uncertainty
-                if np.random.random() < disaster_unc_probs[d]:
+                if rng.random() < disaster_unc_probs[d]:
                     s_pos[t] = 1
         
         # Transition uncertainty
         if t < T - 1:
-            if np.random.random() < g.pr_mat_s[s_pos[t], 1]:
+            if rng.random() < g.pr_mat_s[s_pos[t], 1]:
                 s_pos[t + 1] = 1
             else:
                 s_pos[t + 1] = 0
             
             # Transition productivity
             trans_probs = g.pr_mat_a[a_pos[t], :, s_pos[t]]
-            a_pos[t + 1] = np.searchsorted(np.cumsum(trans_probs), np.random.random())
+            a_pos[t + 1] = np.searchsorted(np.cumsum(trans_probs), rng.random())
     
     # Simulate representative firm
     k_idx = p.knum // 2

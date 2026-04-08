@@ -433,9 +433,6 @@ class IVVAR:
         # CRITICAL FIX: Use MT19937AR matching MATLAB's RandStream
         rng = create_mt19937_rng(seed)
         
-        # Set global seed for any deterministic operations
-        np.random.seed(seed)
-
         # CRITICAL FIX: Use preprocessed data from load_data()
         # This now includes country/time demeaning and instrument standardization
         X = self.X
