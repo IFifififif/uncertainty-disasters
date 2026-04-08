@@ -15,6 +15,8 @@ Key arrays matching Fortran:
 - yfirm: Firm outputs, shape (T, nfirms)
 - returnfirm: Stock returns, shape (T, nfirmspub)
 - returnfirmsd: Cross-sectional return volatility, shape (T, nfirmspub)
+
+CRITICAL FIX: Use MT19937 random generator matching Fortran's random_number
 """
 
 import numpy as np
@@ -27,6 +29,17 @@ from .params import ModelParameters
 from .grids import StateGrids
 from .vfi import VFISolution
 from .adjustment import output, capital_adjustment_cost, labor_adjustment_cost
+
+
+def create_mt19937_rng(seed: int = 2501):
+    """
+    Create a random number generator matching Fortran's random_number.
+    
+    Fortran uses a Mersenne Twister by default in modern compilers.
+    Python's RandomState uses MT19937.
+    """
+    rng = np.random.RandomState(seed)
+    return rng
 
 
 @dataclass
@@ -313,7 +326,7 @@ def simulate_all_firms(
     T : int, optional
         Number of periods. Default from params.
     seed : int
-        Random seed.
+        Random seed (Fortran uses 2501 for simulation).
     verbose : bool
     
     Returns
@@ -327,7 +340,8 @@ def simulate_all_firms(
     if T is None:
         T = p.numdiscard + p.Ncountries * p.Tper
     
-    np.random.seed(seed)
+    # CRITICAL FIX: Use MT19937 matching Fortran's random_number
+    rng = create_mt19937_rng(seed)
     
     if verbose:
         print(f"Simulating {p.nfirms} firms for {T} periods...")
@@ -367,10 +381,10 @@ def simulate_all_firms(
     a_pos[0] = p.ainit - 1
     s_pos[0] = p.sinit - 1
     
-    # Random shocks
-    a_shocks = np.random.random(T)
-    s_shocks = np.random.random(T)
-    z_shocks = np.random.random((T, p.nfirms))
+    # Random shocks - CRITICAL FIX: use rng instead of np.random
+    a_shocks = rng.random(T)
+    s_shocks = rng.random(T)
+    z_shocks = rng.random((T, p.nfirms))
     
     # Simulate exogenous processes
     for t in range(1, T):
@@ -427,8 +441,8 @@ def simulate_all_firms(
         vfirm, dfirm, T, p.nfirmspub
     )
     
-    # Add noise to returns
-    norm_shocks = np.random.randn(T, p.nfirmspub)
+    # Add noise to returns - CRITICAL FIX: use rng
+    norm_shocks = rng.randn(T, p.nfirmspub)
     return_mean = np.mean(returnfirm[2:, :])
     return_std = np.std(returnfirm[2:, :])
     returnfirm_noise = returnfirm + return_std * norm_shocks
@@ -492,6 +506,8 @@ def simulate_irf(
     """
     Compute impulse response to uncertainty shock.
     
+    CRITICAL FIX: Use MT19937 matching Fortran's random_number
+    
     Parameters
     ----------
     params : ModelParameters
@@ -512,7 +528,8 @@ def simulate_irf(
     p = params
     g = grids
     
-    np.random.seed(seed)
+    # CRITICAL FIX: Use MT19937 matching Fortran
+    rng = create_mt19937_rng(seed)
     
     # Storage for IRFs
     irf_Y = np.zeros((T_irf, n_sims))
@@ -542,7 +559,8 @@ def simulate_irf(
             if shock_period <= t < shock_period + int(5 * shock_size):
                 s_pos[t] = 1
             elif t >= shock_period + int(5 * shock_size):
-                if np.random.random() < p.uncpers:
+                # CRITICAL FIX: use rng instead of np.random
+                if rng.random() < p.uncpers:
                     s_pos[t] = 1
                 else:
                     s_pos[t] = 0
@@ -572,7 +590,8 @@ def simulate_irf(
             # Productivity transition
             if t < T - 1:
                 trans_probs = g.pr_mat_a[a_pos[t], :, s_pos[t]]
-                a_pos[t+1] = np.searchsorted(np.cumsum(trans_probs), np.random.random())
+                # CRITICAL FIX: use rng instead of np.random
+                a_pos[t+1] = np.searchsorted(np.cumsum(trans_probs), rng.random())
                 a_pos[t+1] = min(a_pos[t+1], p.anum - 1)
         
         # Store IRF (relative to first period)
