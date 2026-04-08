@@ -22,6 +22,7 @@ from src.utils.regression import (
     demean_multiple_fe,
     iv2sls_with_cluster_se,
     ols_with_cluster_se,
+    areg_ols,
     get_cc_yy_cols,
     format_coef_table,
 )
@@ -238,15 +239,16 @@ class PanelIV:
 
     def _run_areg(self, sample_filter=None):
         """
-        Run OLS with country and period FE matching Stata's areg.
+        Run OLS with country and period FE matching Stata's areg EXACTLY.
 
         Stata: areg ydgdp cs_index_ret cs_index_vol i.yq_int, ab(country) cluster(country)
 
-        This includes BOTH:
-        - Period FE (i.yq_int) - explicit dummies for each period
-        - Country FE (ab(country)) - absorbed (demeaned)
+        CRITICAL FIX: Stata's areg uses a ONE-STEP exact solution:
+        1. Demean y and X by the absorbed group (country)
+        2. Include period dummies (i.yq_int) as EXPLICIT regressors
+        3. Run OLS on the demeaned data with period dummies
 
-        We use iterative demeaning (Frisch-Waugh-Lovell) for two-way FE.
+        This is DIFFERENT from iterative demeaning and produces EXACT results.
         """
         data = self.df.copy()
         if sample_filter is not None:
@@ -258,42 +260,36 @@ class PanelIV:
         data = data[valid].copy()
 
         y = data['ydgdp'].values.astype(np.float64)
-        X = np.column_stack([
+        X_main = np.column_stack([
             data['cs_index_ret'].values.astype(np.float64),
             data['cs_index_vol'].values.astype(np.float64),
         ])
-        clusters = data['country'].values
         country_groups = data['country'].values
         period_groups = data['yq_int'].values
 
-        # Two-way FE: iterative demeaning (Frisch-Waugh-Lovell)
-        # Demean by country first, then by period, iterate until convergence
-        unique_countries = np.unique(country_groups)
+        # Create period dummies (i.yq_int in Stata)
         unique_periods = np.unique(period_groups)
+        n_periods = len(unique_periods)
+        # Drop first period to avoid perfect collinearity (Stata's default)
+        period_dummies = np.zeros((len(data), n_periods - 1))
+        for i, p in enumerate(unique_periods[1:]):
+            period_dummies[:, i] = (period_groups == p).astype(float)
 
-        max_iter = 100
-        tol = 1e-10
-        for iteration in range(max_iter):
-            y_old = y.copy()
-            X_old = X.copy()
+        # Combine main regressors with period dummies
+        X = np.hstack([X_main, period_dummies])
 
-            # Demean by country
-            for c in unique_countries:
-                mask = country_groups == c
-                y[mask] -= y[mask].mean()
-                X[mask] -= X[mask].mean(axis=0)
+        # Use areg_ols for EXACT Stata behavior
+        result = areg_ols(
+            y=y,
+            X=X,
+            absorb_groups=country_groups,
+            cluster_groups=country_groups,
+            include_constant=False,  # No constant after demeaning
+        )
 
-            # Demean by period
-            for p in unique_periods:
-                mask = period_groups == p
-                y[mask] -= y[mask].mean()
-                X[mask] -= X[mask].mean(axis=0)
+        # Store sample for common sample usage
+        result['sample_data'] = data
 
-            # Check convergence
-            if np.max(np.abs(y - y_old)) < tol and np.max(np.abs(X - X_old)) < tol:
-                break
-
-        result = ols_with_cluster_se(y, X, clusters)
         return result, data
 
     # =========================================================================
@@ -418,8 +414,10 @@ class PanelIV:
 
         # Col 4: IV - stock index, common sample
         print("\n--- Column 4: IV (stock index, common sample) ---")
-        # Common sample = sample from Col 1 OLS
-        sample1_vars = ['ydgdp', 'cs_index_ret', 'cs_index_vol', 'country']
+        # CRITICAL FIX: Common sample must match Stata's e(sample) from areg
+        # Stata's areg includes yq_int in the regression, so e(sample) excludes
+        # observations where yq_int is missing
+        sample1_vars = ['ydgdp', 'cs_index_ret', 'cs_index_vol', 'country', 'yq_int']
         common_mask = self.df[sample1_vars].notna().all(axis=1)
         res4, data4 = self._run_iv(
             endog_vars=['l1avgret', 'l1lavgvol'],
@@ -655,8 +653,8 @@ class PanelIV:
 
         results = {}
 
-        # Common sample
-        sample1_vars = ['ydgdp', 'cs_index_ret', 'cs_index_vol', 'country']
+        # Common sample - CRITICAL FIX: must include yq_int to match Stata's e(sample)
+        sample1_vars = ['ydgdp', 'cs_index_ret', 'cs_index_vol', 'country', 'yq_int']
         common_mask = self.df[sample1_vars].notna().all(axis=1)
 
         specs = [
