@@ -180,9 +180,49 @@ class LMNVAR:
             resid_common[dep_var] = y - X @ beta
         
         resid_matrix = np.column_stack([resid_common[v] for v in var_names])
-        self.Sigma_hat = (resid_matrix.T @ resid_matrix) / resid_matrix.shape[0]
+        self.residuals = resid_matrix  # Store for step2
+        self.Sigma_hat = np.cov(resid_matrix.T, ddof=1)  # Use ddof=1 matching MATLAB cov()
 
         print(f"  Residual covariance (diagonal): {np.diag(self.Sigma_hat)}")
+        
+        # CRITICAL FIX: Load event indicators from data
+        # These are needed for admissibility criteria in step2
+        # MATLAB L34-38: pol_event=data(:,11), ter_event=data(:,12), etc.
+        # The event columns should be in the original data
+        
+        # Check if event columns exist in the data
+        event_cols = {
+            'pol_event': ['polshock', 'pol_shock', 'coup'],
+            'ter_event': ['tershock', 'ter_shock', 'terror'],
+            'nat_event': ['natshock', 'nat_shock', 'natural'],
+            'rev_event': ['revshock', 'rev_shock', 'revolution'],
+        }
+        
+        for event_name, possible_cols in event_cols.items():
+            for col in possible_cols:
+                if col in self.df.columns:
+                    setattr(self, event_name, self.df[col].values.astype(float))
+                    break
+            else:
+                # If not found, create dummy (all zeros)
+                print(f"  Warning: {event_name} not found in data, using zeros")
+                setattr(self, event_name, np.zeros(len(self.df)))
+        
+        # Also try to load from VARout.csv if it exists
+        varout_path = self.data_path.parent / 'VARout.csv'
+        if varout_path.exists():
+            try:
+                varout = pd.read_csv(varout_path, header=None)
+                # MATLAB: pol_event=data(:,11), ter_event=data(:,12), nat_event=data(:,13), rev_event=data(:,14)
+                # Python is 0-indexed, so columns 10, 11, 12, 13
+                if varout.shape[1] >= 14:
+                    self.pol_event = varout.iloc[:, 10].values
+                    self.ter_event = varout.iloc[:, 11].values
+                    self.nat_event = varout.iloc[:, 12].values
+                    self.rev_event = varout.iloc[:, 13].values
+                    print(f"  Loaded event indicators from VARout.csv")
+            except Exception as e:
+                print(f"  Warning: Could not load VARout.csv: {e}")
 
         return self
 
@@ -190,15 +230,17 @@ class LMNVAR:
         """
         STEP 2: Compute admissible sets via random matrix draws.
 
-        Matches MATLAB: STEP2_MATLAB_ESTIMATION.m and var_LMN.m
+        Matches MATLAB: var_LMN.m EXACTLY
 
-        CRITICAL FIX: MATLAB uses N = 1,500,000 draws
+        CRITICAL: The admissibility criteria in MATLAB (L169-174) are:
+        1. mean_shocks(rev_event) for shock 3 > 0.15
+        2. mean_shocks(rev_event) for shock 2 < -0.1
+        3. mean_shocks(pol_event) for shock 3 > 0.15
+        4. mean_shocks(pol_event) for shock 2 > 0.1
+        5. mean_shocks(nat_event) for shock 2 < 0.0
+        6. mean_shocks(ter_event) for shock 2 < 0.0
 
-        For each draw:
-        1. Generate random orthogonal matrix Q via QR decomposition
-        2. Compute structural matrix B = Sigma^{1/2} Q
-        3. Check if impulse responses are consistent with disaster events
-        4. If yes, store the impulse responses
+        This is COMPLETELY DIFFERENT from checking IRF signs!
 
         Parameters
         ----------
@@ -210,92 +252,147 @@ class LMNVAR:
         # CRITICAL FIX: Use MT19937AR matching MATLAB's rng(25041)
         rng = create_mt19937_rng(seed)
 
-        Sigma = self.Sigma_hat
-        NX = self.NX
-
-        # Cholesky decomposition of Sigma
-        Sigma_chol = np.linalg.cholesky(Sigma)
-
-        # Build companion form for IRF computation
-        # A_hat is (NX, NX * Nlags), we need B1hat as (NX, NX * Nlags)
-        B1hat = self.A_hat.copy()  # (NX, NX * Nlags) = (3, 9)
-        B1tilde = np.zeros((NX * self.Nlags, NX * self.Nlags))  # (9, 9)
-        B1tilde[:NX, :NX * self.Nlags] = B1hat  # (3, 9) -> (3, 9)
-        if self.Nlags > 1:
-            for ct in range(self.Nlags - 1):
-                # Identity matrices on subdiagonal
-                row_start = (ct + 1) * NX
-                col_start = ct * NX
-                B1tilde[row_start:row_start + NX, col_start:col_start + NX] = np.eye(NX)
-
-        # Disaster event restrictions
-        disaster_restrictions = self._get_disaster_restrictions()
-
-        # Storage for admissible impulse responses
-        admissible_irfs = []
-        B_admissible = []
-        n_admissible = 0
-
-        # Storage for bounds (matching MATLAB's B_admit_lb, B_admit_ub)
+        # Get residuals and event indicators
+        resids = self.residuals  # (T, NX) - should be loaded from Stata output
+        pol_event = self.pol_event  # coup indicator
+        ter_event = self.ter_event  # terror indicator
+        nat_event = self.nat_event  # natural disaster indicator
+        rev_event = self.rev_event  # revolution indicator
+        
+        T, NX = resids.shape
+        
+        # Cholesky decomposition (MATLAB L93-94)
+        # OMEGA = cov(resids); SIGMA = chol(OMEGA,'lower');
+        OMEGA = np.cov(resids.T, ddof=1)
+        SIGMA = np.linalg.cholesky(OMEGA).T  # lower triangular in MATLAB
+        
+        # Build companion form Abar (MATLAB L64-79)
+        Abar = self._build_companion_form()
+        
+        Tirf = self.lengthIRF
+        
+        # Storage (MATLAB L97-103)
+        randB_store = np.zeros((NX, NX, n_draws))
+        mean_shocks_store = np.zeros((NX, n_draws))  # revolution
+        mean_shocks_store_coup = np.zeros((NX, n_draws))
+        mean_shocks_store_ter = np.zeros((NX, n_draws))
+        mean_shocks_store_nat = np.zeros((NX, n_draws))
+        
+        # First pass: compute all shocks and mean shocks (MATLAB L105-152)
+        print("  Computing shocks for all draws...")
+        for randct in range(n_draws):
+            # Generate random rotation (MATLAB L108-117)
+            randM = rng.randn(NX, NX)
+            randQ, randR = np.linalg.qr(randM, mode='reduced')
+            
+            randB = SIGMA @ randQ
+            
+            # Sign correction for diagonal elements (MATLAB L113-117)
+            for shockct in range(NX):
+                if randB[shockct, shockct] < 0:
+                    randB[:, shockct] = -randB[:, shockct]
+            
+            randB_store[:, :, randct] = randB
+            
+            # Compute implied shocks (MATLAB L121-123)
+            # shocks = randB \ resids'  =>  shocks = inv(randB) @ resids.T
+            shocks = np.linalg.solve(randB, resids.T).T  # (T, NX)
+            
+            # Mean shocks for each event type (MATLAB L125-136)
+            if np.sum(rev_event) > 0:
+                mean_shocks_store[:, randct] = np.mean(shocks[rev_event == 1, :], axis=0)
+            if np.sum(pol_event) > 0:
+                mean_shocks_store_coup[:, randct] = np.mean(shocks[pol_event == 1, :], axis=0)
+            if np.sum(ter_event) > 0:
+                mean_shocks_store_ter[:, randct] = np.mean(shocks[ter_event == 1, :], axis=0)
+            if np.sum(nat_event) > 0:
+                mean_shocks_store_nat[:, randct] = np.mean(shocks[nat_event == 1, :], axis=0)
+            
+            if (randct + 1) % 100000 == 0:
+                print(f"  Draw {randct + 1:,}/{n_draws:,}")
+        
+        # Second pass: identify admissible draws (MATLAB L154-213)
+        print("  Identifying admissible draws...")
         B_admit_lb = np.full((NX, NX), np.inf)
         B_admit_ub = np.full((NX, NX), -np.inf)
-        IRF_admit_lb = np.full((NX, NX, self.lengthIRF), np.inf)
-        IRF_admit_ub = np.full((NX, NX, self.lengthIRF), -np.inf)
-
-        for draw in range(n_draws):
-            # CRITICAL FIX: Generate random orthogonal matrix matching MATLAB
-            # MATLAB: randB = randn(NX,NX); [randQ,randR] = qr(randB,0);
-            Z = rng.randn(NX, NX)
-            Q, R = np.linalg.qr(Z, mode='reduced')
-            # MATLAB uses qr(A,0) which is 'reduced' mode
-            # No sign correction needed in MATLAB code
-
-            # Structural matrix: B = Sigma_chol @ Q
-            B = Sigma_chol @ Q
-
-            # Compute impulse responses
-            Btilde = np.zeros((NX * self.Nlags, NX))
-            Btilde[:NX, :NX] = B
-
-            IRF = np.zeros((self.lengthIRF, NX, NX))
-            for varct in range(NX):
-                for t in range(self.lengthIRF):
-                    if t == 0:
-                        IRFvec = Btilde[:, varct]
-                    else:
-                        IRFvec = np.linalg.matrix_power(B1tilde, t - 1) @ Btilde[:, varct]
-                    IRF[t, :, varct] = IRFvec[:NX]
-
-            # Check admissibility
-            if self._check_admissibility(IRF, disaster_restrictions):
-                admissible_irfs.append(IRF)
-                B_admissible.append(B)
-                n_admissible += 1
+        IRF_admit_lb = np.full((NX, NX, Tirf), np.inf)
+        IRF_admit_ub = np.full((NX, NX, Tirf), -np.inf)
+        
+        admissible_irfs = []
+        B_admissible = []
+        admit_ind = []
+        Nadmit = 0
+        
+        for randct in range(n_draws):
+            # CRITICAL: Check admissibility conditions (MATLAB L169-174)
+            if (mean_shocks_store[2, randct] > 0.15 and      # rev_event, shock 3 > 0.15
+                mean_shocks_store[1, randct] < -0.1 and      # rev_event, shock 2 < -0.1
+                mean_shocks_store_coup[2, randct] > 0.15 and # pol_event, shock 3 > 0.15
+                mean_shocks_store_coup[1, randct] > 0.1 and  # pol_event, shock 2 > 0.1
+                mean_shocks_store_nat[1, randct] < 0.0 and   # nat_event, shock 2 < 0
+                mean_shocks_store_ter[1, randct] < 0.0):     # ter_event, shock 2 < 0
                 
-                # Update bounds (matching MATLAB)
+                admit_ind.append(randct)
+                Nadmit += 1
+                
+                randB = randB_store[:, :, randct]
+                B_admissible.append(randB)
+                
+                # Compute IRF (MATLAB L180-193)
+                rand_Bbar = np.zeros((NX * self.Nlags, NX))
+                rand_Bbar[:NX, :NX] = randB
+                
+                rand_IRF = np.zeros((NX, NX, Tirf))
+                for horz in range(Tirf):
+                    rand_IRFbar = np.linalg.matrix_power(Abar, horz) @ rand_Bbar
+                    rand_IRF[:, :, horz] = rand_IRFbar[:NX, :NX]
+                
+                # Transpose to match expected shape (Tirf, NX, NX)
+                IRF = np.transpose(rand_IRF, (2, 0, 1))
+                admissible_irfs.append(IRF)
+                
+                # Update bounds (MATLAB L200-209)
                 for varct in range(NX):
                     for shockct in range(NX):
-                        B_admit_lb[varct, shockct] = min(B_admit_lb[varct, shockct], B[varct, shockct])
-                        B_admit_ub[varct, shockct] = max(B_admit_ub[varct, shockct], B[varct, shockct])
-                        for t in range(self.lengthIRF):
-                            IRF_admit_lb[varct, shockct, t] = min(IRF_admit_lb[varct, shockct, t], IRF[t, varct, shockct])
-                            IRF_admit_ub[varct, shockct, t] = max(IRF_admit_ub[varct, shockct, t], IRF[t, varct, shockct])
-
-            if (draw + 1) % 100000 == 0:
-                print(f"  Draw {draw + 1:,}/{n_draws:,}, Admissible: {n_admissible:,}")
-
-        print(f"  Total admissible: {n_admissible:,}/{n_draws:,} "
-              f"({100 * n_admissible / n_draws:.2f}%)")
+                        B_admit_lb[varct, shockct] = min(B_admit_lb[varct, shockct], randB[varct, shockct])
+                        B_admit_ub[varct, shockct] = max(B_admit_ub[varct, shockct], randB[varct, shockct])
+                        for t in range(Tirf):
+                            IRF_admit_lb[varct, shockct, t] = min(IRF_admit_lb[varct, shockct, t], rand_IRF[varct, shockct, t])
+                            IRF_admit_ub[varct, shockct, t] = max(IRF_admit_ub[varct, shockct, t], rand_IRF[varct, shockct, t])
+        
+        print(f"  Total admissible: {Nadmit:,}/{n_draws:,} ({100 * Nadmit / n_draws:.4f}%)")
 
         self.admissible_irfs = admissible_irfs
         self.B_admissible = B_admissible
-        self.n_admissible = n_admissible
+        self.n_admissible = Nadmit
         self.B_admit_lb = B_admit_lb
         self.B_admit_ub = B_admit_ub
         self.IRF_admit_lb = IRF_admit_lb
         self.IRF_admit_ub = IRF_admit_ub
+        self.admit_ind = admit_ind
 
         return self
+    
+    def _build_companion_form(self):
+        """Build companion form matrix Abar matching MATLAB L64-79."""
+        NX = self.NX
+        Nlags = self.Nlags
+        
+        # A_hat is (NX, NX * Nlags)
+        Abar = np.zeros((NX * Nlags, NX * Nlags))
+        
+        # Fill first NX rows with A_hat
+        Abar[:NX, :] = self.A_hat
+        
+        # Fill subdiagonal with identity matrices
+        for k in range(Nlags - 1):
+            stct_x = NX + k * NX
+            endct_x = NX + (k + 1) * NX
+            stct_y = k * NX
+            endct_y = (k + 1) * NX
+            Abar[stct_x:endct_x, stct_y:endct_y] = np.eye(NX)
+        
+        return Abar
 
     def _get_disaster_restrictions(self):
         """
