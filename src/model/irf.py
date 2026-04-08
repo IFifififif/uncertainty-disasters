@@ -189,7 +189,11 @@ def compute_irf_parallel(
     irf_AC_all = np.zeros((n_sims, T))
     
     for sim in prange(n_sims):
-        # Set seed for this simulation
+        # NOTE: In numba parallel mode, np.random uses numba's internal RNG
+        # which may differ from Fortran's random_number. However, since IRF
+        # is computed by averaging over many simulations, the statistical
+        # properties should be correct as long as the RNG produces uniform draws.
+        # For exact replication, pre-generate random numbers outside numba.
         np.random.seed(seed + sim)
         
         # Pre-generate random draws (same for baseline and shocked)
