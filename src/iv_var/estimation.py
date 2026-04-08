@@ -563,24 +563,41 @@ class IVVAR:
         Same as estimate_baseline
         """
         print(f"\n--- {name} IV-VAR Estimation ---")
-        np.random.seed(seed)
+        
+        # CRITICAL FIX: Use MT19937AR matching MATLAB
+        rng = create_mt19937_rng(seed)
 
-        X = self.data.values[:, :self.NX].astype(np.float64)
-        D = self.data.values[:, self.NX:self.NX + self.ND].astype(np.float64)
+        # CRITICAL FIX: Use preprocessed data from load_data()
+        X = self.X.copy()
+        D = self.D.copy()
+        Xmin1 = self.Xmin1.copy()
 
         if data_modifier is not None:
-            X, D = data_modifier(X, D, **kwargs)
+            X, D, Xmin1 = data_modifier(X, D, Xmin1, **kwargs)
 
-        MOMvec, eta_hat, A_hat = self._build_moment_vector(X, D)
+        MOMvec, eta_hat, A_hat = self._build_moment_vector(X, D, Xmin1)
         B1hat = A_hat.T.reshape(self.NX, self.NX * self.Nlags)
 
         param0 = self._initial_params()
+        
+        # CRITICAL FIX: Use same optimizer as estimate_baseline (SLSQP)
+        # with same constraints and bounds
+        boundval = 1.75
+        bounds = [(-boundval, boundval) for _ in range(self.Nparams)]
+        constraints = [
+            {'type': 'ineq', 'fun': lambda x: x[0]},   # B(1,1) >= 0
+            {'type': 'ineq', 'fun': lambda x: x[4]},   # B(2,2) >= 0
+            {'type': 'ineq', 'fun': lambda x: x[8]},   # B(3,3) >= 0
+        ]
+        
         result = minimize(
             self._gmm_objective,
             param0,
             args=(MOMvec,),
-            method='L-BFGS-B',
-            options={'maxiter': 50000, 'ftol': 1e-15, 'gtol': 1e-10},
+            method='SLSQP',
+            bounds=bounds,
+            constraints=constraints,
+            options={'maxiter': 50000, 'ftol': 1e-12, 'disp': False},
         )
 
         paramhat = result.x
@@ -620,15 +637,18 @@ class IVVAR:
         IRF_S_TO_Y_SE : (15,) standard errors of IRF
         
         CRITICAL FIX: Use MT19937AR random generator matching MATLAB.
+        CRITICAL FIX: Use preprocessed data from load_data().
         """
         print(f"\n--- Bootstrap SEs ({n_boot} replications) ---")
         
         # CRITICAL FIX: Use MT19937AR matching MATLAB's RandStream
         rng = create_mt19937_rng(seed)
 
-        X = self.data.values[:, :self.NX].astype(np.float64)
-        D = self.data.values[:, self.NX:self.NX + self.ND].astype(np.float64)
-        T = X.shape[0]
+        # CRITICAL FIX: Use preprocessed data from load_data()
+        X = self.X
+        D = self.D
+        Xmin1 = self.Xmin1
+        T = self.T
         Nlags = self.Nlags
 
         # Store bootstrap IRFs
@@ -639,19 +659,31 @@ class IVVAR:
 
         for boot_ct in range(n_boot):
             # Stationary block bootstrap
-            Xb, Db = self._stationary_block_bootstrap(X, D, rng, block_size)
+            Xb, Db, Xmin1b = self._stationary_block_bootstrap(X, D, Xmin1, rng, block_size)
 
             # Estimate on bootstrap sample
             try:
-                MOMvec_b, eta_hat_b, A_hat_b = self._build_moment_vector(Xb, Db)
+                MOMvec_b, eta_hat_b, A_hat_b = self._build_moment_vector(Xb, Db, Xmin1b)
                 B1hat_b = A_hat_b.T.reshape(self.NX, self.NX * Nlags)
 
                 param0 = self._initial_params()
+                
+                # CRITICAL FIX: Use same optimizer as estimate_baseline
+                boundval = 1.75
+                bounds = [(-boundval, boundval) for _ in range(self.Nparams)]
+                constraints = [
+                    {'type': 'ineq', 'fun': lambda x: x[0]},
+                    {'type': 'ineq', 'fun': lambda x: x[4]},
+                    {'type': 'ineq', 'fun': lambda x: x[8]},
+                ]
+                
                 result = minimize(
                     self._gmm_objective,
                     param0,
                     args=(MOMvec_b,),
                     method='SLSQP',
+                    bounds=bounds,
+                    constraints=constraints,
                     options={'maxiter': 50000, 'ftol': 1e-12, 'disp': False},
                 )
 
@@ -707,19 +739,24 @@ class IVVAR:
         return IRF_S_TO_Y_SE
 
     def _stationary_block_bootstrap(self, X: np.ndarray, D: np.ndarray,
+                                     Xmin1: np.ndarray,
                                      rng: np.random.RandomState,
                                      block_size: int):
         """
         Stationary block bootstrap with geometric block sizes.
 
         Matches MATLAB's stationaryBB.m with sim=1 (geometric pdf).
+        
+        CRITICAL FIX: Also bootstrap Xmin1 to maintain consistency.
         """
         T, NX = X.shape
         ND = D.shape[1]
+        NXmin1 = Xmin1.shape[1]
 
         # Append first n-1 observations (wrap-around)
         X_ext = np.vstack([X, X[:T - 1]])
         D_ext = np.vstack([D, D[:T - 1]])
+        Xmin1_ext = np.vstack([Xmin1, Xmin1[:T - 1]])
         n_ext = T - 1  # length of extended series
 
         # Generate random starting indices
@@ -731,6 +768,7 @@ class IVVAR:
         # Bootstrap
         Xb = np.zeros((T, NX))
         Db = np.zeros((T, ND))
+        Xmin1b = np.zeros((T, NXmin1))
 
         for j in range(NX):
             h = 0
@@ -754,7 +792,18 @@ class IVVAR:
                 if h >= T:
                     break
 
-        return Xb, Db
+        for j in range(NXmin1):
+            h = 0
+            for m in range(T):
+                for jj in range(b[m]):
+                    if h >= T:
+                        break
+                    Xmin1b[h, j] = Xmin1_ext[I[m] + jj, j]
+                    h += 1
+                if h >= T:
+                    break
+
+        return Xb, Db, Xmin1b
 
     def plot_figure6(self, IRF_BASE: np.ndarray, IRF_SE: np.ndarray):
         """
