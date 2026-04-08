@@ -121,6 +121,8 @@ class PanelIV:
         
         Paper (p.728): "scaled to have residualized unit standard deviation"
         This means: std(x - Px @ x) where P is the projection matrix for FE.
+        
+        CRITICAL: Stata uses ddof=1 for standard deviation calculation.
         """
         # QR decomposition for numerical stability
         Q, R = np.linalg.qr(partial, mode='reduced')
@@ -131,7 +133,8 @@ class PanelIV:
         
         # Residualize
         x_resid = x - Px @ x
-        return np.std(x_resid)
+        # CRITICAL: Use ddof=1 to match Stata's sd() function
+        return np.std(x_resid, ddof=1)
 
     def _scale_to_residualized_unit_std(
         self, 

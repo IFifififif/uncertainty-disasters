@@ -398,8 +398,9 @@ class IVVAR:
                     IRFvec = np.linalg.matrix_power(B1tilde, t - 1) @ Btilde[:, varct]
                 IRF[t, :, varct] = IRFvec[:NX]
             # Scale: sqrt(var(X(:,varct))) * IRF / Bhat(varct,varct)
+            # CRITICAL: MATLAB uses var() which has ddof=1 by default
             if Bhat[varct, varct] != 0:
-                IRF[:, :, varct] = (np.sqrt(np.var(X[:, varct])) *
+                IRF[:, :, varct] = (np.sqrt(np.var(X[:, varct], ddof=1)) *
                                     IRF[:, :, varct] / Bhat[varct, varct])
 
         return IRF
