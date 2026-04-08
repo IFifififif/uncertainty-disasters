@@ -391,8 +391,8 @@ def simulate_iv_data(
         # Base growth
         growth[t] += base_growth + rng.normal(0, 0.01)
         
-        # First moment (normalized)
-        first_moment[t] = growth[t] / np.std(growth)
+        # First moment (normalized) - CRITICAL: use ddof=1 matching Stata
+        first_moment[t] = growth[t] / np.std(growth, ddof=1) if t > 0 else growth[t]
         
         # Second moment (log volatility)
         second_moment[t] = np.log(base_vol + second_moment[t] * 0.02)

@@ -444,7 +444,8 @@ def simulate_all_firms(
     # Add noise to returns - CRITICAL FIX: use rng
     norm_shocks = rng.randn(T, p.nfirmspub)
     return_mean = np.mean(returnfirm[2:, :])
-    return_std = np.std(returnfirm[2:, :])
+    # CRITICAL: use ddof=1 matching Stata/MATLAB
+    return_std = np.std(returnfirm[2:, :], ddof=1)
     returnfirm_noise = returnfirm + return_std * norm_shocks
     
     # =====================

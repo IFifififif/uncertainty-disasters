@@ -509,7 +509,8 @@ def compute_model_moments(
     window = 4  # Quarterly to annual
     for t in range(window, T):
         first_moment[t] = np.mean(growth[t-window:t])
-        second_moment[t] = np.std(growth[t-window:t])
+        # CRITICAL: use ddof=1 matching Stata/MATLAB
+        second_moment[t] = np.std(growth[t-window:t], ddof=1)
     
     return {
         'growth': growth,
