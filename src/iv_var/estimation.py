@@ -418,7 +418,63 @@ class IVVAR:
         p[13] = 0    # Dcoeff(4,1)
         return 0.25 * p
 
-    def estimate_baseline(self, seed: int = 3991):
+    def _solve_gmm(
+        self,
+        MOMvec: np.ndarray,
+        param0: np.ndarray,
+        n_starts: int = 1,
+        start_jitter: float = 0.0,
+        seed: int = 3991,
+    ):
+        """
+        Constrained GMM solve with optional deterministic multi-start.
+
+        The optimization problem remains identical to MATLAB's fmincon setup:
+        - bounds: [-1.75, 1.75]
+        - inequality constraints: B(1,1)>=0, B(2,2)>=0, B(3,3)>=0
+        """
+        boundval = 1.75
+        bounds = [(-boundval, boundval) for _ in range(self.Nparams)]
+        constraints = [
+            {'type': 'ineq', 'fun': lambda x: x[0]},
+            {'type': 'ineq', 'fun': lambda x: x[4]},
+            {'type': 'ineq', 'fun': lambda x: x[8]},
+        ]
+
+        rng = create_mt19937_rng(seed)
+        starts = [param0.copy()]
+        for _ in range(max(n_starts - 1, 0)):
+            jittered = param0 + start_jitter * rng.randn(self.Nparams)
+            starts.append(np.clip(jittered, -boundval, boundval))
+
+        best_result = None
+        all_results = []
+        for s in starts:
+            res = minimize(
+                self._gmm_objective,
+                s,
+                args=(MOMvec,),
+                method='SLSQP',
+                bounds=bounds,
+                constraints=constraints,
+                options={
+                    'maxiter': 50000,
+                    'ftol': 1e-12,
+                    'disp': False,
+                },
+            )
+            all_results.append(res)
+            if best_result is None or res.fun < best_result.fun:
+                best_result = res
+
+        return best_result, all_results
+
+    def estimate_baseline(
+        self,
+        seed: int = 3991,
+        n_starts: int = 1,
+        start_jitter: float = 0.0,
+    ):
         """
         Estimate the baseline IV-VAR (matches BASELINE/VAR.m).
 
@@ -433,9 +489,6 @@ class IVVAR:
         CRITICAL FIX: Use MT19937AR random generator matching MATLAB.
         """
         print("\n--- Baseline IV-VAR Estimation ---")
-        
-        # CRITICAL FIX: Use MT19937AR matching MATLAB's RandStream
-        rng = create_mt19937_rng(seed)
         
         # CRITICAL FIX: Use preprocessed data from load_data()
         # This now includes country/time demeaning and instrument standardization
@@ -456,66 +509,22 @@ class IVVAR:
         param0 = self._initial_params()
         print(f"  Initial GMM objective: {self._gmm_objective(param0, MOMvec):.6f}")
 
-        # CRITICAL FIX: Add inequality constraints matching MATLAB
-        # MATLAB L197-201:
-        # Aineq = zeros(3,Nparams);
-        # Aineq(1,1) = -1;  % B(1,1) <= 0
-        # Aineq(2,5) = -1;  % B(2,2) <= 0
-        # Aineq(3,9) = -1;  % B(3,3) <= 0
-        # Bineq = zeros(3,1);
-        # This means: -B(1,1) <= 0, -B(2,2) <= 0, -B(3,3) <= 0
-        # i.e., B diagonal elements must be non-positive
-        
-        from scipy.optimize import minimize
-        
-        # Bounds: [-1.75, 1.75] for all parameters (MATLAB L203)
-        boundval = 1.75
-        bounds = [(-boundval, boundval) for _ in range(self.Nparams)]
-        
-        # Inequality constraints: A @ x <= b
-        # -param[0] <= 0  (B(1,1) >= 0, but MATLAB uses -1 so B(1,1) <= 0)
-        # Wait, let me re-check MATLAB code...
-        # Aineq(1,1) = -1 means: -param(1) <= 0, i.e., param(1) >= 0
-        # But that contradicts my earlier analysis. Let me verify.
-        # Actually, Aineq @ x <= Bineq means: -x[0] <= 0, so x[0] >= 0
-        # But for structural VAR, we typically want B diagonal to be positive for identification
-        # Let me check the MATLAB code again...
-        
-        # Actually, looking at MATLAB L197-201:
-        # Aineq(1,1) = -1; Aineq(2,5) = -1; Aineq(3,9) = -1;
-        # Bineq = zeros(3,1);
-        # This gives: -x[0] <= 0, -x[4] <= 0, -x[8] <= 0
-        # Which means: x[0] >= 0, x[4] >= 0, x[8] >= 0
-        # i.e., B(1,1) >= 0, B(2,2) >= 0, B(3,3) >= 0
-        
-        # For scipy.optimize.minimize with SLSQP, constraints are dict:
-        # {'type': 'ineq', 'fun': lambda x: ...} where fun(x) >= 0
-        
-        constraints = [
-            {'type': 'ineq', 'fun': lambda x: x[0]},   # B(1,1) >= 0
-            {'type': 'ineq', 'fun': lambda x: x[4]},   # B(2,2) >= 0
-            {'type': 'ineq', 'fun': lambda x: x[8]},   # B(3,3) >= 0
-        ]
-        
-        # Use SLSQP which is closest to MATLAB's fmincon for constrained optimization
-        result = minimize(
-            self._gmm_objective,
-            param0,
-            args=(MOMvec,),
-            method='SLSQP',
-            bounds=bounds,
-            constraints=constraints,
-            options={
-                'maxiter': 50000,
-                'ftol': 1e-12,
-                'disp': False,
-            },
+        # Solve with MATLAB-equivalent constraints; optionally run deterministic
+        # multi-start search to probe path dependence.
+        result, all_results = self._solve_gmm(
+            MOMvec=MOMvec,
+            param0=param0,
+            n_starts=n_starts,
+            start_jitter=start_jitter,
+            seed=seed,
         )
 
         paramhat = result.x
         print(f"  Final GMM objective: {result.fun:.10f}")
         print(f"  Converged: {result.success}")
         print(f"  Iterations: {result.nit}")
+        if n_starts > 1:
+            print(f"  Multi-start candidates: {len(all_results)}")
 
         # Extract B matrix
         Bhat = np.zeros((self.NX, self.NX))
@@ -545,6 +554,12 @@ class IVVAR:
             'A_hat': A_hat,
             'B1hat': B1hat,
             'MOMvec': MOMvec,
+            'solver': {
+                'n_starts': n_starts,
+                'start_jitter': start_jitter,
+                'n_candidates': len(all_results),
+                'best_objective': float(result.fun),
+            },
         }
 
     def estimate_robustness(self, data_modifier=None, name: str = "robustness",
