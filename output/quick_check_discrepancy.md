@@ -8,5 +8,5 @@
 | IV_VAR   | Bootstrap SE finite check      | finite SE vector                     |      9.72565   | ok                     | run-ok   |
 | LMN_VAR  | Execution status               | must run end-to-end                  |      1         | ok                     | run-ok   |
 | LMN_VAR  | Admissible share (5k draws)    | >0 often requires large N draws      |      0.0038    | ok                     | run-ok   |
-| MODEL    | Moment RMSE (20 moments)       | 0 (perfect match target)             |      4.92058   | 4.920584150735211      | run-ok   |
-| MODEL    | Moment MAE (20 moments)        | 0 (perfect match target)             |      3.01952   | 3.019518343710499      | run-ok   |
+| MODEL    | Moment RMSE (20 moments)       | 0 (perfect match target)             |      3.51968   | 3.5196790363317265     | run-ok   |
+| MODEL    | Moment MAE (20 moments)        | 0 (perfect match target)             |      2.34031   | 2.3403137495695776     | run-ok   |

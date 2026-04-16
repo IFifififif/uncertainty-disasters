@@ -17,7 +17,7 @@ from typing import Tuple, Dict, Callable, Optional
 from dataclasses import dataclass
 
 from .params import ModelParameters
-from .grids import StateGrids, build_grids
+from .grids import StateGrids, build_grids, build_tauchen_transition_sv
 from .vfi import VFISolution, solve_vfi_simplified
 from .simulation import simulate_firms
 from .optimizer import PSOConfig, pso_optimize
@@ -306,22 +306,65 @@ def simulate_firms_with_disasters(
 
     a_pos[0] = max(0, min(p.anum - 1, p.ainit - 1))
     s_pos[0] = max(0, min(p.snum - 1, p.sinit - 1))
-    erg_meana = float(np.mean(np.log(np.clip(g.a_grid, 1e-12, None))))
+
+    # Match Fortran parameter adjustments before uncexogsim:
+    # 1) adjust uncfreq downward by disaster-induced high-unc probability
+    # 2) compute meanshifta and rebuild pr_mat_a with that mean shift
+    highuncerg = p.uncfreq / (1.0 + p.uncfreq - p.uncpers)
+    firstsecondprob = 0.0  # Fortran default in wrapper
+    meanshifta = -(
+        p.sigmaa * float(np.sum(disaster_probs * disaster_levels))
+        + highuncerg * firstsecondprob * np.log(max(p.amin, 1e-12))
+    )
+
+    uncfreq_adj = p.uncfreq - float(np.sum(disaster_probs * disaster_unc_probs))
+    pr_s = np.zeros((p.snum, p.snum), dtype=np.float64)
+    pr_s[0, :] = [1.0 - uncfreq_adj, uncfreq_adj]
+    pr_s[0, :] = pr_s[0, :] / np.sum(pr_s[0, :])
+    pr_s[1, :] = [1.0 - p.uncpers, p.uncpers]
+    pr_s[1, :] = pr_s[1, :] / np.sum(pr_s[1, :])
+
+    pr_a = build_tauchen_transition_sv(
+        g.a_grid, p.anum, p.rhoa, g.sigmaa_grid, p.snum, meanshift=meanshifta
+    )
+
+    # Fortran uncexogsim computes ergodic distribution of (s,a) implied by pr_s/pr_a.
+    # We replicate it to obtain ergmeana used for first-moment jump probabilities.
+    joint = np.zeros((p.snum, p.anum), dtype=np.float64)
+    joint[0, 0] = 1.0
+    for _ in range(1000):
+        nxt = np.zeros_like(joint)
+        for s_prev in range(p.snum):
+            for a_prev in range(p.anum):
+                mass = joint[s_prev, a_prev]
+                if mass == 0.0:
+                    continue
+                for s_next in range(p.snum):
+                    ps = pr_s[s_prev, s_next]
+                    if ps == 0.0:
+                        continue
+                    nxt[s_next, :] += mass * ps * pr_a[a_prev, :, s_prev]
+        if np.max(np.abs(nxt - joint)) < 1e-6:
+            joint = nxt
+            break
+        joint = nxt
+
+    ergdista = np.sum(joint, axis=0)
+    erg_meana = float(np.sum(np.log(np.clip(g.a_grid, 1e-12, None)) * ergdista))
     
     for t in range(1, T):
         # Baseline uncertainty transition (from pr_mat_s), then disaster-induced switch.
-        pr_s = g.pr_mat_s[s_pos[t - 1], :]
-        s_pos[t] = int(np.searchsorted(np.cumsum(pr_s), s_shocks[t], side="right"))
+        pr_s_row = pr_s[s_pos[t - 1], :]
+        s_pos[t] = int(np.searchsorted(np.cumsum(pr_s_row), s_shocks[t], side="right"))
         s_pos[t] = min(max(s_pos[t], 0), p.snum - 1)
 
         second_mom_prob = float(np.sum(disaster_occurred[t, :] * disaster_unc_probs))
-        second_mom_prob = min(max(second_mom_prob, 0.0), 1.0)
         if schg_shocks[t] <= second_mom_prob:
             s_pos[t] = 1
 
         # Baseline aggregate productivity transition.
-        pr_a = g.pr_mat_a[a_pos[t - 1], :, s_pos[t - 1]]
-        a_pos[t] = int(np.searchsorted(np.cumsum(pr_a), a_shocks[t], side="right"))
+        pr_a_row = pr_a[a_pos[t - 1], :, s_pos[t - 1]]
+        a_pos[t] = int(np.searchsorted(np.cumsum(pr_a_row), a_shocks[t], side="right"))
         a_pos[t] = min(max(a_pos[t], 0), p.anum - 1)
 
         # Disaster first-moment effect (Fortran uncexogsim logic).
@@ -330,13 +373,11 @@ def simulate_firms_with_disasters(
             if tot_first_mom >= 0.0:
                 denom = np.log(max(g.a_grid[-1], 1e-12)) - erg_meana
                 prob = (tot_first_mom / denom) if abs(denom) > 1e-12 else 0.0
-                prob = min(max(prob, 0.0), 1.0)
                 if achg_shocks[t] <= prob:
                     a_pos[t] = p.anum - 1
             else:
                 denom = np.log(max(g.a_grid[0], 1e-12)) - erg_meana
                 prob = (tot_first_mom / denom) if abs(denom) > 1e-12 else 0.0
-                prob = min(max(prob, 0.0), 1.0)
                 if achg_shocks[t] <= prob:
                     a_pos[t] = 0
 
