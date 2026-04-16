@@ -1,6 +1,6 @@
 module,metric,reference,python_value,delta,status
-IV,Table2 Col2 coef(cs_index_ret),Stata ivreg2 output,1.1968369823947853,N/A (no baseline file),run-ok
-IV,Table2 Col2 coef(cs_index_vol),Stata ivreg2 output,-4.236311645774647,N/A (no baseline file),run-ok
+IV,Table2 Col2 coef(cs_index_ret),Stata ivreg2 output,1.1968369823947809,N/A (no baseline file),run-ok
+IV,Table2 Col2 coef(cs_index_vol),Stata ivreg2 output,-4.236311645774637,N/A (no baseline file),run-ok
 IV_VAR,Baseline impact t=1,MATLAB VAR.m (negative GDP response),-0.09639310613254559,sign-ok,run-ok
 IV_VAR,Bootstrap SE finite check,finite SE vector,9.725648250803081,ok,run-ok
 LMN_VAR,Execution status,must run end-to-end,1.0,ok,run-ok

@@ -15,6 +15,7 @@ import pandas as pd
 from typing import Optional, Tuple, List
 from scipy import linalg
 from scipy.stats import chi2, f as f_dist
+from linearmodels.iv import IV2SLS
 
 
 def demean_by_group(df: pd.DataFrame, cols: list, group_col: str) -> pd.DataFrame:
@@ -602,7 +603,7 @@ def iv2sls_with_cluster_se(
     """
     N = len(y)
 
-    # Step 1: Partial out if specified (FWL theorem)
+    # Step 1: Partial out if specified (FWL theorem), matching Stata partial()
     if partial_out is not None:
         y_res, X_endog_res = partial_out_fwl(y, X_endog, partial_out)
         _, X_exog_res = partial_out_fwl(y, X_exog, partial_out) if X_exog.shape[1] > 0 else (y, X_exog)
@@ -613,111 +614,57 @@ def iv2sls_with_cluster_se(
         X_exog_res = X_exog.copy()
         Z_res = Z.copy()
 
-    # Build full instrument matrix: [X_exog, Z]
-    W = np.hstack([X_exog_res, Z_res]) if X_exog_res.shape[1] > 0 else Z_res
-
-    # First stage: regress each endogenous variable on W
-    L_endog = X_endog_res.shape[1] if X_endog_res.ndim > 1 else 1
     if X_endog_res.ndim == 1:
         X_endog_res = X_endog_res.reshape(-1, 1)
 
+    # Remove near-constant instrument columns to keep estimator stable
+    Z_stds = np.std(Z_res, axis=0)
+    valid_z = Z_stds > 1e-10
+    Z_clean = Z_res[:, valid_z] if not np.all(valid_z) else Z_res
+
+    cov_type = 'clustered' if clusters is not None else 'unadjusted'
+    fit_kwargs = {'cov_type': cov_type}
+    if clusters is not None:
+        fit_kwargs['clusters'] = clusters
+
+    # Use linearmodels IV2SLS covariance and tests (closer to Stata ivreg2)
+    iv_fit = IV2SLS(y_res, X_exog_res if X_exog_res.shape[1] > 0 else None, X_endog_res, Z_clean).fit(**fit_kwargs)
+
+    params = np.asarray(iv_fit.params, dtype=np.float64)
+    ses = np.asarray(iv_fit.std_errors, dtype=np.float64)
+    n_exog = X_exog_res.shape[1]
+    coef_endog = params[n_exog:]
+    se_endog = ses[n_exog:]
+
+    # First-stage details per endogenous variable
     first_stage_results = []
-    X_hat_list = []
-
-    # Remove constant/near-constant columns from W
-    W_stds = np.std(W, axis=0)
-    valid_cols = W_stds > 1e-10
-    W_clean = W[:, valid_cols] if not np.all(valid_cols) else W
-
-    for j in range(L_endog):
-        # OLS of X_endog_j on W
-        try:
-            pi_j = np.linalg.lstsq(W_clean, X_endog_res[:, j], rcond=None)[0]
-        except:
-            pi_j = np.linalg.pinv(W_clean.T @ W_clean) @ (W_clean.T @ X_endog_res[:, j])
-
-        X_hat_j = W_clean @ pi_j
-        X_hat_list.append(X_hat_j)
-
-        # Compute Kleibergen-Paap rk Wald F statistic
-        # This is the CORRECT F statistic for weak instruments with clustering
-        F_kp = compute_kp_rk_wald_f(
-            y_res,  # Not used directly, but for consistency
-            X_endog_res[:, j:j+1],
-            Z_res,
-            X_exog_res,
-            clusters
-        )
-
+    fs_diag = iv_fit.first_stage.diagnostics
+    instr_count = Z_clean.shape[1]
+    endog_names = list(iv_fit.first_stage.individual.keys())
+    for j, name in enumerate(endog_names):
+        fs_model = iv_fit.first_stage.individual[name]
+        # linearmodels reports chi2 under robust covariances; map to F-like scale
+        # by dividing by # excluded instruments for continuity with existing output.
+        chi2_like = float(fs_diag.loc[name, 'f.stat'])
+        f_like = chi2_like / max(instr_count, 1)
         first_stage_results.append({
-            'coef': pi_j,
-            'F_stat': F_kp,  # KP rk Wald F, NOT simple F
-            'F_stat_type': 'Kleibergen-Paap rk Wald F',
-            'X_hat': X_hat_j,
+            'coef': np.asarray(fs_model.params, dtype=np.float64),
+            'F_stat': f_like,
+            'F_stat_type': f"chi2/{instr_count} (from robust first-stage test)",
+            'X_hat': np.asarray(fs_model.fitted_values, dtype=np.float64),
         })
 
-    X_hat = np.column_stack(X_hat_list)
-
-    # Second stage: regress y on [X_exog, X_hat]
-    if X_exog_res.shape[1] == 0:
-        X_2sls = X_hat
+    # Sargan overidentification test (NaN when exactly identified)
+    if iv_fit.sargan is not None and np.isfinite(iv_fit.sargan.stat):
+        J_stat = float(iv_fit.sargan.stat)
+        J_pval = float(iv_fit.sargan.pval)
     else:
-        X_2sls = np.hstack([X_exog_res, X_hat])
-
-    if clusters is None:
-        result = ols_with_classical_se(y_res, X_2sls)
-    else:
-        result = ols_with_cluster_se(y_res, X_2sls, clusters)
-
-    # Organize coefficients
-    n_exog = X_exog_res.shape[1]
-    coef_endog = result['coef'][n_exog:]
-    se_endog = result['se'][n_exog:]
-
-    # Hansen J statistic (overidentification test)
-    # IMPORTANT: Use residuals computed with ORIGINAL endogenous variables
-    if X_exog_res.shape[1] > 0:
-        e = y_res - np.hstack([X_exog_res, X_endog_res]) @ result['coef']
-    else:
-        e = y_res - X_endog_res @ coef_endog
-
-    # Cluster-robust Hansen J statistic
-    L = W_clean.shape[1]  # number of instruments
-
-    if clusters is None:
-        dof = max(N - X_2sls.shape[1], 1)
-        sigma2 = float((e.T @ e) / dof)
-        V_mom = sigma2 * (W_clean.T @ W_clean)
-    else:
-        unique_clusters = np.unique(clusters)
-        V_mom = np.zeros((L, L))
-        for c in unique_clusters:
-            mask = clusters == c
-            Wc = W_clean[mask]
-            ec = e[mask]
-            g_c = Wc.T @ ec
-            V_mom += np.outer(g_c, g_c)
-
-    try:
-        V_inv = np.linalg.inv(V_mom)
-    except:
-        V_inv = np.linalg.pinv(V_mom)
-
-    g = W_clean.T @ e  # total moment condition
-    J_stat = float(g.T @ V_inv @ g)
-
-    # Degrees of freedom: number of overidentifying restrictions
-    n_instr_used = W_clean.shape[1]
-    n_overid = n_instr_used - L_endog
-
-    if n_overid > 0:
-        J_pval = 1 - chi2.cdf(J_stat, n_overid)
-    else:
+        J_stat = np.nan
         J_pval = np.nan
 
     return {
-        'coef': result['coef'],
-        'se': result['se'],
+        'coef': params,
+        'se': ses,
         'coef_endog': coef_endog,
         'se_endog': se_endog,
         'first_stage': first_stage_results,
@@ -725,8 +672,8 @@ def iv2sls_with_cluster_se(
         'J_pval': J_pval,
         'nobs': N,
         'nclusters': 0 if clusters is None else len(np.unique(clusters)),
-        'residuals': result['residuals'],
-        'V': result['V'],
+        'residuals': np.asarray(iv_fit.resids, dtype=np.float64),
+        'V': np.asarray(iv_fit.cov, dtype=np.float64),
     }
 
 
