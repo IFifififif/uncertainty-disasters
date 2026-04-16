@@ -526,12 +526,55 @@ def ols_with_cluster_se(
     }
 
 
+def ols_with_classical_se(
+    y: np.ndarray,
+    X: np.ndarray,
+) -> dict:
+    """
+    OLS estimation with classical (non-clustered) standard errors.
+
+    Used for IV specifications in the original Stata code that do not
+    include cluster(country).
+    """
+    N, K = X.shape
+
+    XtX = X.T @ X
+    Xty = X.T @ y
+    try:
+        XtX_inv = np.linalg.inv(XtX)
+    except np.linalg.LinAlgError:
+        XtX_inv = np.linalg.pinv(XtX)
+
+    beta = XtX_inv @ Xty
+    residuals = y - X @ beta
+
+    sigma2 = np.sum(residuals ** 2) / max(N - K, 1)
+    V = sigma2 * XtX_inv
+    se = np.sqrt(np.diag(V))
+
+    y_mean = y.mean()
+    ss_tot = np.sum((y - y_mean) ** 2)
+    ss_res = np.sum(residuals ** 2)
+    r2 = 1 - ss_res / ss_tot if ss_tot > 0 else 0
+
+    return {
+        'coef': beta,
+        'se': se,
+        'residuals': residuals,
+        'nobs': N,
+        'nclusters': 0,
+        'r2': r2,
+        'r2_within': r2,
+        'V': V,
+    }
+
+
 def iv2sls_with_cluster_se(
     y: np.ndarray,
     X_endog: np.ndarray,
     X_exog: np.ndarray,
     Z: np.ndarray,
-    clusters: np.ndarray,
+    clusters: Optional[np.ndarray],
     partial_out: Optional[np.ndarray] = None,
 ) -> dict:
     """
@@ -621,7 +664,10 @@ def iv2sls_with_cluster_se(
     else:
         X_2sls = np.hstack([X_exog_res, X_hat])
 
-    result = ols_with_cluster_se(y_res, X_2sls, clusters)
+    if clusters is None:
+        result = ols_with_classical_se(y_res, X_2sls)
+    else:
+        result = ols_with_cluster_se(y_res, X_2sls, clusters)
 
     # Organize coefficients
     n_exog = X_exog_res.shape[1]
@@ -636,28 +682,26 @@ def iv2sls_with_cluster_se(
         e = y_res - X_endog_res @ coef_endog
 
     # Cluster-robust Hansen J statistic
-    unique_clusters = np.unique(clusters)
-    n_clusters = len(unique_clusters)
     L = W_clean.shape[1]  # number of instruments
 
-    # Compute cluster-robust variance matrix of moment conditions
-    V_cluster = np.zeros((L, L))
-    for c in unique_clusters:
-        mask = clusters == c
-        Wc = W_clean[mask]
-        ec = e[mask]
-        g_c = Wc.T @ ec  # moment condition for this cluster
-        V_cluster += np.outer(g_c, g_c)
-
-    # Small sample correction for Hansen J
-    # Stata uses: J_corrected = J * G / (G-1) where G = number of clusters
-    # But the standard formula is J = g' V^{-1} g
-    # with V already being the cluster-robust variance
+    if clusters is None:
+        dof = max(N - X_2sls.shape[1], 1)
+        sigma2 = float((e.T @ e) / dof)
+        V_mom = sigma2 * (W_clean.T @ W_clean)
+    else:
+        unique_clusters = np.unique(clusters)
+        V_mom = np.zeros((L, L))
+        for c in unique_clusters:
+            mask = clusters == c
+            Wc = W_clean[mask]
+            ec = e[mask]
+            g_c = Wc.T @ ec
+            V_mom += np.outer(g_c, g_c)
 
     try:
-        V_inv = np.linalg.inv(V_cluster)
+        V_inv = np.linalg.inv(V_mom)
     except:
-        V_inv = np.linalg.pinv(V_cluster)
+        V_inv = np.linalg.pinv(V_mom)
 
     g = W_clean.T @ e  # total moment condition
     J_stat = float(g.T @ V_inv @ g)
@@ -680,7 +724,7 @@ def iv2sls_with_cluster_se(
         'J_stat': J_stat,
         'J_pval': J_pval,
         'nobs': N,
-        'nclusters': len(np.unique(clusters)),
+        'nclusters': 0 if clusters is None else len(np.unique(clusters)),
         'residuals': result['residuals'],
         'V': result['V'],
     }

@@ -60,7 +60,7 @@ class LMNVAR:
 
         # VAR dimensions
         self.NX = 3  # GDP growth, first moment, second moment
-        self.Nlags = 3
+        self.Nlags = 12
         self.lengthIRF = 50
 
     def load_data(self):
@@ -71,7 +71,12 @@ class LMNVAR:
         print(f"  Columns: {list(self.df.columns[:20])}...")
         return self
 
-    def step1_estimate_var_fe(self):
+    def step1_estimate_var_fe(
+        self,
+        include_country_fe: bool = True,
+        include_time_fe: bool = True,
+        nlags: Optional[int] = None,
+    ):
         """
         STEP 1: Estimate VAR with country and time fixed effects.
 
@@ -82,29 +87,44 @@ class LMNVAR:
         Returns demeaned residuals for each equation.
         """
         print("\n--- Step 1: VAR with FE estimation ---")
+        if nlags is not None:
+            self.Nlags = int(nlags)
 
-        # Variable names (matching Stata code)
-        # Note: Data uses 'ret' and 'vol' instead of 'avgret' and 'lavgvol'
-        var_names = ['ydgdp', 'ret', 'vol']
+        # Match Stata *_var_OLSest.do exactly:
+        # est_y = ydgdp
+        # est_first = l.ret
+        # est_second = l.log(vol)
+        var_names = ['est_y', 'est_first', 'est_second']
 
-        # Build lagged variables and time variable
+        # Build transformed variables and lagged variables.
         data = self.df.copy()
         # Create yq_int (year-quarter integer for time FE)
         data['yq_int'] = data['year'] * 4 + data['quarter']
+        data['est_y'] = data['ydgdp']
+        data['est_first'] = data.groupby('country')['ret'].shift(1)
+        data['logvol'] = np.log(np.clip(data['vol'].astype(float), 1e-12, None))
+        data['est_second'] = data.groupby('country')['logvol'].shift(1)
+
+        # Standardize est_first and est_second by sample std (Stata summ ... r(sd)).
+        for v in ['est_first', 'est_second']:
+            sd = data[v].std(ddof=1)
+            if sd and np.isfinite(sd) and sd > 0:
+                data[v] = data[v] / sd
+
         for var in var_names:
             for lag in range(1, self.Nlags + 1):
-                data[f'l{lag}{var}'] = data.groupby('country')[var].shift(lag)
+                data[f'{var}_{lag}'] = data.groupby('country')[var].shift(lag)
 
         # Estimate each equation separately (matching reghdfe)
         residuals = {}
         A_hat = np.zeros((self.NX, self.NX * self.Nlags))
 
         for eq_idx, dep_var in enumerate(var_names):
-            # Build regressors: lags of all 3 variables
+            # Build regressors: lags of all 3 VAR variables (Stata est_y_* est_first_* est_second_*)
             regressor_names = []
             for lag in range(1, self.Nlags + 1):
                 for var in var_names:
-                    regressor_names.append(f'l{lag}{var}')
+                    regressor_names.append(f'{var}_{lag}')
 
             all_cols = [dep_var] + regressor_names + ['country', 'yq_int']
             valid = data[all_cols].notna().all(axis=1)
@@ -113,8 +133,12 @@ class LMNVAR:
             y = eq_data[dep_var].values.astype(np.float64)
             X = eq_data[regressor_names].values.astype(np.float64)
 
-            # Iterative demeaning by country and time (Frisch-Waugh-Lovell)
-            for fe_col in ['country', 'yq_int']:
+            fe_cols = []
+            if include_country_fe:
+                fe_cols.append('country')
+            if include_time_fe:
+                fe_cols.append('yq_int')
+            for fe_col in fe_cols:
                 groups = eq_data[fe_col].values
                 unique_groups = np.unique(groups)
                 for g in unique_groups:
@@ -145,7 +169,7 @@ class LMNVAR:
         # Need to align them on a common sample
         
         # Find common valid observations across all equations
-        all_lag_cols = [f'l{l}{v}' for l in range(1, self.Nlags + 1) for v in var_names]
+        all_lag_cols = [f'{v}_{l}' for l in range(1, self.Nlags + 1) for v in var_names]
         common_valid = np.ones(len(data), dtype=bool)
         for dep_var in var_names:
             cols_needed = [dep_var] + all_lag_cols + ['country', 'yq_int']
@@ -165,8 +189,12 @@ class LMNVAR:
             regressor_names = all_lag_cols
             X = eq_data[regressor_names].values.astype(np.float64)
             
-            # Demean by FE
-            for fe_col in ['country', 'yq_int']:
+            fe_cols = []
+            if include_country_fe:
+                fe_cols.append('country')
+            if include_time_fe:
+                fe_cols.append('yq_int')
+            for fe_col in fe_cols:
                 groups = eq_data[fe_col].values
                 unique_groups = np.unique(groups)
                 for g in unique_groups:
@@ -182,6 +210,7 @@ class LMNVAR:
         resid_matrix = np.column_stack([resid_common[v] for v in var_names])
         self.residuals = resid_matrix  # Store for step2
         self.Sigma_hat = np.cov(resid_matrix.T, ddof=1)  # Use ddof=1 matching MATLAB cov()
+        self.common_valid_mask = common_valid.copy()
 
         print(f"  Residual covariance (diagonal): {np.diag(self.Sigma_hat)}")
         
@@ -201,12 +230,13 @@ class LMNVAR:
         for event_name, possible_cols in event_cols.items():
             for col in possible_cols:
                 if col in self.df.columns:
-                    setattr(self, event_name, self.df[col].values.astype(float))
+                    # Align event indicators to the common residual sample.
+                    setattr(self, event_name, data.loc[common_valid, col].values.astype(float))
                     break
             else:
                 # If not found, create dummy (all zeros)
                 print(f"  Warning: {event_name} not found in data, using zeros")
-                setattr(self, event_name, np.zeros(len(self.df)))
+                setattr(self, event_name, np.zeros(resid_matrix.shape[0]))
         
         # Also try to load from VARout.csv if it exists
         varout_path = self.data_path.parent / 'VARout.csv'
@@ -215,18 +245,23 @@ class LMNVAR:
                 varout = pd.read_csv(varout_path, header=None)
                 # MATLAB: pol_event=data(:,11), ter_event=data(:,12), nat_event=data(:,13), rev_event=data(:,14)
                 # Python is 0-indexed, so columns 10, 11, 12, 13
-                if varout.shape[1] >= 14:
-                    self.pol_event = varout.iloc[:, 10].values
-                    self.ter_event = varout.iloc[:, 11].values
-                    self.nat_event = varout.iloc[:, 12].values
-                    self.rev_event = varout.iloc[:, 13].values
+                if varout.shape[1] >= 14 and varout.shape[0] == len(data):
+                    self.pol_event = varout.iloc[:, 10].values[common_valid]
+                    self.ter_event = varout.iloc[:, 11].values[common_valid]
+                    self.nat_event = varout.iloc[:, 12].values[common_valid]
+                    self.rev_event = varout.iloc[:, 13].values[common_valid]
                     print(f"  Loaded event indicators from VARout.csv")
             except Exception as e:
                 print(f"  Warning: Could not load VARout.csv: {e}")
 
         return self
 
-    def step2_admissible_sets(self, n_draws: int = 1500000, seed: int = 25041):
+    def step2_admissible_sets(
+        self,
+        n_draws: int = 1500000,
+        seed: int = 25041,
+        restrictions: Optional[dict] = None,
+    ):
         """
         STEP 2: Compute admissible sets via random matrix draws.
 
@@ -252,6 +287,17 @@ class LMNVAR:
         # CRITICAL FIX: Use MT19937AR matching MATLAB's rng(25041)
         rng = create_mt19937_rng(seed)
 
+        if restrictions is None:
+            # Baseline restrictions from BASELINE/var_LMN.m style.
+            restrictions = {
+                'rev3_min': 0.15,
+                'rev2_max': -0.10,
+                'coup3_min': 0.15,
+                'coup2_min': 0.10,
+                'nat2_max': 0.0,
+                'ter2_max': 0.0,
+            }
+
         # Get residuals and event indicators
         resids = self.residuals  # (T, NX) - should be loaded from Stata output
         pol_event = self.pol_event  # coup indicator
@@ -264,7 +310,8 @@ class LMNVAR:
         # Cholesky decomposition (MATLAB L93-94)
         # OMEGA = cov(resids); SIGMA = chol(OMEGA,'lower');
         OMEGA = np.cov(resids.T, ddof=1)
-        SIGMA = np.linalg.cholesky(OMEGA).T  # lower triangular in MATLAB
+        # MATLAB uses chol(OMEGA,'lower'), so keep lower-triangular factor.
+        SIGMA = np.linalg.cholesky(OMEGA)
         
         # Build companion form Abar (MATLAB L64-79)
         Abar = self._build_companion_form()
@@ -324,13 +371,21 @@ class LMNVAR:
         Nadmit = 0
         
         for randct in range(n_draws):
-            # CRITICAL: Check admissibility conditions (MATLAB L169-174)
-            if (mean_shocks_store[2, randct] > 0.15 and      # rev_event, shock 3 > 0.15
-                mean_shocks_store[1, randct] < -0.1 and      # rev_event, shock 2 < -0.1
-                mean_shocks_store_coup[2, randct] > 0.15 and # pol_event, shock 3 > 0.15
-                mean_shocks_store_coup[1, randct] > 0.1 and  # pol_event, shock 2 > 0.1
-                mean_shocks_store_nat[1, randct] < 0.0 and   # nat_event, shock 2 < 0
-                mean_shocks_store_ter[1, randct] < 0.0):     # ter_event, shock 2 < 0
+            pass_cond = True
+            if 'rev3_min' in restrictions:
+                pass_cond = pass_cond and (mean_shocks_store[2, randct] > restrictions['rev3_min'])
+            if 'rev2_max' in restrictions:
+                pass_cond = pass_cond and (mean_shocks_store[1, randct] < restrictions['rev2_max'])
+            if 'coup3_min' in restrictions:
+                pass_cond = pass_cond and (mean_shocks_store_coup[2, randct] > restrictions['coup3_min'])
+            if 'coup2_min' in restrictions:
+                pass_cond = pass_cond and (mean_shocks_store_coup[1, randct] > restrictions['coup2_min'])
+            if 'nat2_max' in restrictions:
+                pass_cond = pass_cond and (mean_shocks_store_nat[1, randct] < restrictions['nat2_max'])
+            if 'ter2_max' in restrictions:
+                pass_cond = pass_cond and (mean_shocks_store_ter[1, randct] < restrictions['ter2_max'])
+
+            if pass_cond:
                 
                 admit_ind.append(randct)
                 Nadmit += 1
@@ -371,7 +426,27 @@ class LMNVAR:
         self.IRF_admit_ub = IRF_admit_ub
         self.admit_ind = admit_ind
 
-        return self
+        if Nadmit > 0:
+            admissible_arr = np.array(admissible_irfs)  # (Nadmit, Tirf, NX, NX)
+            self.IRF_med = np.median(np.transpose(admissible_arr, (2, 3, 1, 0)), axis=3)
+            gdp_path = admissible_arr[:, :, 0, 2]
+            self.impact_hist = gdp_path[:, 0]
+            max_idx = int(np.argmax(self.impact_hist))
+            self.IRF_maxg = np.transpose(admissible_arr[max_idx], (1, 2, 0))
+        else:
+            self.IRF_med = None
+            self.impact_hist = np.array([])
+            self.IRF_maxg = None
+
+        return {
+            'n_admissible': Nadmit,
+            'IRF_admit_lb': IRF_admit_lb,
+            'IRF_admit_ub': IRF_admit_ub,
+            'IRF_med': self.IRF_med,
+            'IRF_maxg': self.IRF_maxg,
+            'IMPACT_HIST': self.impact_hist,
+            'admissible_irfs': admissible_irfs,
+        }
     
     def _build_companion_form(self):
         """Build companion form matrix Abar matching MATLAB L64-79."""
@@ -452,7 +527,7 @@ class LMNVAR:
         """
         print("\n--- Step 3: Generating Figures ---")
 
-        if not hasattr(self, 'admissible_irfs') or len(self.admissible_irfs) == 0:
+        if not hasattr(self, 'spec_results'):
             print("  ERROR: No admissible IRFs found. Run step2 first.")
             return
 
@@ -460,83 +535,109 @@ class LMNVAR:
         matplotlib.use('Agg')
         import matplotlib.pyplot as plt
 
-        IRFsamp = np.arange(1, 16)
-        admissible = np.array(self.admissible_irfs)
+        IRFsamp = np.arange(1, 51)
+        base = self.spec_results['BASELINE']
 
-        # Compute median and quantiles across admissible set
-        # GDP response to uncertainty shock
-        gdp_irfs = admissible[:, :15, 0, 2]  # (n_admissible, 15)
-        gdp_median = np.median(gdp_irfs, axis=0)
-        gdp_q16 = np.percentile(gdp_irfs, 16, axis=0)
-        gdp_q84 = np.percentile(gdp_irfs, 84, axis=0)
-
-        # Volatility response to uncertainty shock
-        vol_irfs = admissible[:, :15, 2, 2]
-        vol_median = np.median(vol_irfs, axis=0)
-        vol_q16 = np.percentile(vol_irfs, 16, axis=0)
-        vol_q84 = np.percentile(vol_irfs, 84, axis=0)
-
-        # Returns response to uncertainty shock
-        ret_irfs = admissible[:, :15, 1, 2]
-        ret_median = np.median(ret_irfs, axis=0)
-        ret_q16 = np.percentile(ret_irfs, 16, axis=0)
-        ret_q84 = np.percentile(ret_irfs, 84, axis=0)
-
-        # FIGURE 3: GDP response
+        # FIGURE 3: baseline admissible envelope + med + maxg
         fig, ax = plt.subplots(figsize=(10, 6))
-        ax.plot(IRFsamp, gdp_median, 'bo-', linewidth=2.5, label='Median')
-        ax.fill_between(IRFsamp, gdp_q16, gdp_q84, alpha=0.3, color='blue', label='68% CI')
-        ax.plot(IRFsamp, np.zeros(15), 'k--', linewidth=2.5)
-        ax.set_ylim(-10, 5)
+        ax.plot(IRFsamp, base['IRF_admit_lb'][0, 2, :], 'b', linewidth=1.0, label='LB/UB')
+        ax.plot(IRFsamp, base['IRF_admit_ub'][0, 2, :], 'b', linewidth=1.0)
+        if base['IRF_maxg'] is not None:
+            ax.plot(IRFsamp, base['IRF_maxg'][0, 2, :], 'r-o', linewidth=1.0, markersize=2, label='MaxG')
+        if base['IRF_med'] is not None:
+            ax.plot(IRFsamp, base['IRF_med'][0, 2, :], 'g-x', linewidth=1.0, markersize=2, label='Median')
+        ax.plot(IRFsamp, np.zeros(len(IRFsamp)), 'k--', linewidth=1.0)
+        ax.set_xlim(1, 15)
+        ax.set_ylim(-4, 1)
         ax.set_xlabel('Quarters, Shock in Period 1', fontsize=14)
         ax.set_ylabel('GDP Growth, Percent Year-on-Year', fontsize=14)
         ax.tick_params(labelsize=14)
-        ax.legend(fontsize=12)
         out_path = self.output_dir / "FIGURE3.pdf"
         fig.savefig(out_path, bbox_inches='tight')
         plt.close(fig)
         print(f"  Saved {out_path}")
 
-        # FIGURE 4: Volatility response
+        # FIGURE 4: impact histograms for baseline / rev+coup only / rev only
         fig, ax = plt.subplots(figsize=(10, 6))
-        ax.plot(IRFsamp, vol_median, 'bo-', linewidth=2.5, label='Median')
-        ax.fill_between(IRFsamp, vol_q16, vol_q84, alpha=0.3, color='blue', label='68% CI')
-        ax.plot(IRFsamp, np.zeros(15), 'k--', linewidth=2.5)
-        ax.set_xlabel('Quarters, Shock in Period 1', fontsize=14)
-        ax.set_ylabel('Uncertainty, Percent', fontsize=14)
+        if 'REV_ONLY' in self.spec_results and len(self.spec_results['REV_ONLY']['IMPACT_HIST']) > 0:
+            ax.hist(self.spec_results['REV_ONLY']['IMPACT_HIST'], bins=25, density=True, alpha=0.8, color='red')
+        if 'REV_COUP_ONLY' in self.spec_results and len(self.spec_results['REV_COUP_ONLY']['IMPACT_HIST']) > 0:
+            ax.hist(self.spec_results['REV_COUP_ONLY']['IMPACT_HIST'], bins=25, density=True, alpha=0.8, color='green')
+        if len(base['IMPACT_HIST']) > 0:
+            ax.hist(base['IMPACT_HIST'], bins=25, density=True, alpha=0.8, color='blue')
+        ax.set_xlabel('GDP Growth Response to Uncertainty', fontsize=14)
+        ax.set_ylabel('Probability', fontsize=14)
         ax.tick_params(labelsize=14)
-        ax.legend(fontsize=12)
         out_path = self.output_dir / "FIGURE4.pdf"
         fig.savefig(out_path, bbox_inches='tight')
         plt.close(fig)
         print(f"  Saved {out_path}")
 
-        # FIGURE 5: Returns response
+        # FIGURE 5: robustness envelopes
         fig, ax = plt.subplots(figsize=(10, 6))
-        ax.plot(IRFsamp, ret_median, 'bo-', linewidth=2.5, label='Median')
-        ax.fill_between(IRFsamp, ret_q16, ret_q84, alpha=0.3, color='blue', label='68% CI')
-        ax.plot(IRFsamp, np.zeros(15), 'k--', linewidth=2.5)
+        ax.plot(IRFsamp, base['IRF_admit_lb'][0, 2, :], 'b', linewidth=1.0)
+        ax.plot(IRFsamp, base['IRF_admit_ub'][0, 2, :], 'b', linewidth=1.0)
+        if base['IRF_maxg'] is not None:
+            ax.plot(IRFsamp, base['IRF_maxg'][0, 2, :], 'r-o', linewidth=1.0, markersize=2)
+        for spec_name, style in [
+            ('14LAGS', 'g-x'),
+            ('TIGHTER', 'm-d'),
+            ('LOOSER', 'c-*'),
+            ('NO_TIME_FE', 'y-s'),
+            ('NO_COUNTRY_FE', '^-'),
+            ('10LAGS', 'o-'),
+        ]:
+            if spec_name in self.spec_results:
+                spec = self.spec_results[spec_name]
+                ax.plot(IRFsamp, spec['IRF_admit_lb'][0, 2, :], style, linewidth=1.0, markersize=2)
+                ax.plot(IRFsamp, spec['IRF_admit_ub'][0, 2, :], style, linewidth=1.0, markersize=2)
+        ax.plot(IRFsamp, np.zeros(len(IRFsamp)), 'k--', linewidth=1.0)
+        ax.set_xlim(1, 15)
+        ax.set_ylim(-4, 1)
         ax.set_xlabel('Quarters, Shock in Period 1', fontsize=14)
-        ax.set_ylabel('Returns, Percent', fontsize=14)
+        ax.set_ylabel('GDP Growth, Percent Year-on-Year', fontsize=14)
         ax.tick_params(labelsize=14)
-        ax.legend(fontsize=12)
         out_path = self.output_dir / "FIGURE5.pdf"
         fig.savefig(out_path, bbox_inches='tight')
         plt.close(fig)
         print(f"  Saved {out_path}")
 
         return {
-            'gdp_median': gdp_median, 'gdp_q16': gdp_q16, 'gdp_q84': gdp_q84,
-            'vol_median': vol_median, 'vol_q16': vol_q16, 'vol_q84': vol_q84,
-            'ret_median': ret_median, 'ret_q16': ret_q16, 'ret_q84': ret_q84,
+            'baseline_admissible': base['n_admissible'],
+            'spec_names': list(self.spec_results.keys()),
         }
 
-    def run_all(self):
+    def run_all(self, n_draws: int = 1500000):
         """Run full LMN VAR pipeline."""
         self.load_data()
-        self.step1_estimate_var_fe()
-        # CRITICAL FIX: Use 1,500,000 draws matching MATLAB
-        self.step2_admissible_sets(n_draws=1500000, seed=25041)
+        self.spec_results = {}
+
+        specs = [
+            ('BASELINE', 12, True, True,
+             {'rev3_min': 0.15, 'rev2_max': -0.10, 'coup3_min': 0.15, 'coup2_min': 0.10, 'nat2_max': 0.0, 'ter2_max': 0.0}),
+            ('LOOSER', 12, True, True,
+             {'rev3_min': 0.14, 'rev2_max': -0.09, 'coup3_min': 0.14, 'coup2_min': 0.09, 'nat2_max': 0.0, 'ter2_max': 0.0}),
+            ('TIGHTER', 12, True, True,
+             {'rev3_min': 0.16, 'rev2_max': -0.11, 'coup3_min': 0.16, 'coup2_min': 0.11, 'nat2_max': 0.0, 'ter2_max': 0.0}),
+            ('NO_COUNTRY_FE', 12, False, True,
+             {'rev3_min': 0.10, 'rev2_max': -0.05}),
+            ('NO_TIME_FE', 12, True, False,
+             {'rev3_min': 0.10, 'rev2_max': -0.05, 'coup3_min': 0.10, 'coup2_min': 0.05, 'nat2_max': 0.0, 'ter2_max': 0.0}),
+            ('10LAGS', 10, True, True,
+             {'rev3_min': 0.15, 'rev2_max': -0.10, 'coup3_min': 0.15, 'coup2_min': 0.10, 'nat2_max': 0.0, 'ter2_max': 0.0}),
+            ('14LAGS', 14, True, True,
+             {'rev3_min': 0.15, 'rev2_max': -0.10, 'coup3_min': 0.15, 'coup2_min': 0.10, 'nat2_max': 0.0, 'ter2_max': 0.0}),
+            ('REV_ONLY', 12, True, True,
+             {'rev3_min': 0.15, 'rev2_max': -0.10}),
+            ('REV_COUP_ONLY', 12, True, True,
+             {'rev3_min': 0.15, 'rev2_max': -0.10, 'coup3_min': 0.15, 'coup2_min': 0.10}),
+        ]
+
+        for name, nlags, cfe, tfe, rest in specs:
+            print(f"\n=== Spec: {name} ===")
+            self.step1_estimate_var_fe(include_country_fe=cfe, include_time_fe=tfe, nlags=nlags)
+            self.spec_results[name] = self.step2_admissible_sets(n_draws=n_draws, seed=25041, restrictions=rest)
+
         self.step3_generate_figures()
 
         print("\n" + "=" * 70)

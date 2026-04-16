@@ -10,6 +10,7 @@ Run all modules or individual modules:
 """
 
 import sys
+import os
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent
@@ -33,14 +34,19 @@ def run_lmn_var():
     """Run LMN VAR estimation (Figures 3-5)."""
     from src.lmn_var.estimation import LMNVAR
     lmn = LMNVAR()
-    lmn.run_all()
+    n_draws = int(os.getenv("LMN_N_DRAWS", "1500000"))
+    lmn.run_all(n_draws=n_draws)
 
 
 def run_model():
     """Run model simulation (Figure 8)."""
     from src.model.solve import MicroMacroModel
-    model = MicroMacroModel()
-    model.run_all()
+    simplified = os.getenv("MODEL_SIMPLIFIED", "1") not in {"0", "false", "False"}
+    do_estimation = os.getenv("MODEL_DO_ESTIMATION", "0") in {"1", "true", "True"}
+    irf_t = int(os.getenv("MODEL_IRF_T", "40"))
+    irf_sims = int(os.getenv("MODEL_IRF_N_SIMS", "100"))
+    model = MicroMacroModel(simplified=simplified)
+    model.run_all(do_estimation=do_estimation, irf_T=irf_t, irf_n_sims=irf_sims)
 
 
 def main():

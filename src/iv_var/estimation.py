@@ -78,137 +78,145 @@ class IVVAR:
         self.Nlags = 3
         self.lengthIRF = 50
 
-    def load_data(self):
+    def _prepare_panel_data(
+        self,
+        raw_data: pd.DataFrame,
+        time_filter=None,
+        demean_country: bool = True,
+        demean_time: bool = True,
+    ):
         """
-        Load VARdata.csv and preprocess matching MATLAB BASELINE/VAR.m.
-        
-        CRITICAL FIX: MATLAB code has extensive preprocessing:
-        1. Scale first and second moments by country (L88-90)
-        2. Demean by country (L119-127)
-        3. Demean by time (L129-143)
-        4. Standardize instruments (L147-150)
+        Prepare panel data exactly following the MATLAB variants.
+
+        Parameters
+        ----------
+        raw_data : full VARdata dataframe
+        time_filter : optional callable on Time column returning boolean mask
+        demean_country : whether to remove country fixed effects
+        demean_time : whether to remove time fixed effects
         """
-        print(f"Loading data from {self.data_path}")
-        raw_data = pd.read_csv(self.data_path)
-        print(f"  Raw shape: {raw_data.shape}")
-        
-        # Extract columns matching MATLAB code
-        # MATLAB: Growth=col1, First=col2, Second=col3, NatDis=col4, PolShock=col5, Revolution=col6, Terror=col7, Country=col8, Time=col9
-        Growth = raw_data.iloc[:, 0].values
-        First = raw_data.iloc[:, 1].values
-        Second = raw_data.iloc[:, 2].values
-        NatDis = raw_data.iloc[:, 3].values
-        PolShock = raw_data.iloc[:, 4].values
-        Revolution = raw_data.iloc[:, 5].values
-        Terror = raw_data.iloc[:, 6].values
-        Country = raw_data.iloc[:, 7].values
-        Time = raw_data.iloc[:, 8].values
-        
-        # Get unique countries
+        data = raw_data.copy()
+        if time_filter is not None:
+            time_values = data.iloc[:, 8].values
+            data = data[time_filter(time_values)].copy()
+
+        Growth = data.iloc[:, 0].values
+        First = data.iloc[:, 1].values
+        Second = data.iloc[:, 2].values
+        NatDis = data.iloc[:, 3].values
+        PolShock = data.iloc[:, 4].values
+        Revolution = data.iloc[:, 5].values
+        Terror = data.iloc[:, 6].values
+        Country = data.iloc[:, 7].values
+        Time = data.iloc[:, 8].values
+
         CountryList = np.unique(Country)
         Ncountries = len(CountryList)
-        
-        # Initialize arrays
+
         X_list = []
         Xmin1_list = []
         D_list = []
         CountryFlags_list = []
         TimeFlags_list = []
-        
+
         for countryct in range(Ncountries):
             country_code = CountryList[countryct]
             countrysamp = Country == country_code
-            
+
             rawTimecountry = Time[countrysamp]
             rawCountrycountry = Country[countrysamp]
-            
+
             rawXcountry = np.column_stack([
                 Growth[countrysamp],
                 First[countrysamp],
-                Second[countrysamp]
+                Second[countrysamp],
             ])
             rawDcountry = np.column_stack([
                 NatDis[countrysamp],
                 PolShock[countrysamp],
                 Revolution[countrysamp],
-                Terror[countrysamp]
+                Terror[countrysamp],
             ])
-            
+
             Tcountry = rawXcountry.shape[0]
-            sampleVARcountry = np.arange(self.Nlags, Tcountry)  # (Nlags+1):Tcountry in MATLAB (1-indexed)
-            
+            sampleVARcountry = np.arange(self.Nlags, Tcountry)
+
             if len(sampleVARcountry) > self.Nlags + 1:
-                # CRITICAL: Scale first and second moments by country (MATLAB L88-90)
-                # rawXcountry(sampleVARcountry,2) = rawXcountry(sampleVARcountry,2)/sqrt(var(...))
+                # MATLAB uses var(x) for this step (sample variance, ddof=1).
                 var_first = np.var(rawXcountry[sampleVARcountry, 1], ddof=1)
                 var_second = np.var(rawXcountry[sampleVARcountry, 2], ddof=1)
                 if var_first > 0:
                     rawXcountry[sampleVARcountry, 1] = rawXcountry[sampleVARcountry, 1] / np.sqrt(var_first)
                 if var_second > 0:
                     rawXcountry[sampleVARcountry, 2] = rawXcountry[sampleVARcountry, 2] / np.sqrt(var_second)
-                
+
                 X_list.append(rawXcountry[sampleVARcountry, :])
                 D_list.append(rawDcountry[sampleVARcountry, :])
                 CountryFlags_list.append(rawCountrycountry[sampleVARcountry])
                 TimeFlags_list.append(rawTimecountry[sampleVARcountry])
-                
-                # Build lagged X
+
                 for lagct in range(self.Nlags):
-                    sample_lag = sampleVARcountry - (lagct + 1)  # MATLAB: sampleVARcountry-lagct
+                    sample_lag = sampleVARcountry - (lagct + 1)
                     if lagct == 0:
                         Xmin1country = rawXcountry[sample_lag, :]
                     else:
                         Xmin1country = np.hstack([Xmin1country, rawXcountry[sample_lag, :]])
-                
                 Xmin1_list.append(Xmin1country)
-        
-        # Concatenate all countries
+
         X = np.vstack(X_list)
         Xmin1 = np.vstack(Xmin1_list)
         D = np.vstack(D_list)
         CountryFlags = np.concatenate(CountryFlags_list)
         TimeFlags = np.concatenate(TimeFlags_list)
-        
         T = X.shape[0]
-        
-        # CRITICAL: Demean by country (MATLAB L119-127)
-        for countryct in range(Ncountries):
-            country_code = CountryList[countryct]
-            countrysamp = CountryFlags == country_code
-            numobs = np.sum(countrysamp)
-            if numobs > 0:
-                X[countrysamp, :] = X[countrysamp, :] - np.mean(X[countrysamp, :], axis=0)
-                Xmin1[countrysamp, :] = Xmin1[countrysamp, :] - np.mean(Xmin1[countrysamp, :], axis=0)
-        
-        # CRITICAL: Demean by time (MATLAB L129-143)
-        TimeList = np.unique(TimeFlags)
-        for t in TimeList:
-            timesamp = TimeFlags == t
-            numobs = np.sum(timesamp)
-            if numobs > 0:
-                X[timesamp, :] = X[timesamp, :] - np.mean(X[timesamp, :], axis=0)
-                Xmin1[timesamp, :] = Xmin1[timesamp, :] - np.mean(Xmin1[timesamp, :], axis=0)
-        
-        # CRITICAL: Standardize instruments (MATLAB L147-150)
-        # D = D - mean(D); D = D / sqrt(var(D));
+
+        if demean_country:
+            for countryct in range(Ncountries):
+                country_code = CountryList[countryct]
+                countrysamp = CountryFlags == country_code
+                numobs = np.sum(countrysamp)
+                if numobs > 0:
+                    X[countrysamp, :] = X[countrysamp, :] - np.mean(X[countrysamp, :], axis=0)
+                    Xmin1[countrysamp, :] = Xmin1[countrysamp, :] - np.mean(Xmin1[countrysamp, :], axis=0)
+
+        if demean_time:
+            TimeList = np.unique(TimeFlags)
+            for t in TimeList:
+                timesamp = TimeFlags == t
+                numobs = np.sum(timesamp)
+                if numobs > 0:
+                    X[timesamp, :] = X[timesamp, :] - np.mean(X[timesamp, :], axis=0)
+                    Xmin1[timesamp, :] = Xmin1[timesamp, :] - np.mean(Xmin1[timesamp, :], axis=0)
+
+        # MATLAB code uses var(D,1): population variance (ddof=0).
         D = D - np.mean(D, axis=0)
-        D_std = np.sqrt(np.var(D, axis=0, ddof=1))
-        D_std[D_std == 0] = 1  # Avoid division by zero
+        D_std = np.sqrt(np.var(D, axis=0, ddof=0))
+        D_std[D_std == 0] = 1
         D = D / D_std
         D[np.isnan(D)] = 0
-        
-        # Store preprocessed data
+
         self.X = X
         self.Xmin1 = Xmin1
         self.D = D
         self.CountryFlags = CountryFlags
         self.TimeFlags = TimeFlags
         self.T = T
-        
-        # Also store as DataFrame for compatibility
         self.data = pd.DataFrame(np.hstack([X, D]))
-        
-        print(f"  Preprocessed shape: X={X.shape}, D={D.shape}, T={T}")
+
+    def load_data(self):
+        """
+        Load baseline data and apply baseline preprocessing from VAR.m.
+        """
+        print(f"Loading data from {self.data_path}")
+        self.raw_data = pd.read_csv(self.data_path)
+        print(f"  Raw shape: {self.raw_data.shape}")
+        self._prepare_panel_data(
+            self.raw_data,
+            time_filter=None,
+            demean_country=True,
+            demean_time=True,
+        )
+        print(f"  Preprocessed shape: X={self.X.shape}, D={self.D.shape}, T={self.T}")
         return self
 
     def _build_moment_vector(self, X: np.ndarray, D: np.ndarray, Xmin1: np.ndarray = None):
@@ -358,7 +366,7 @@ class IVVAR:
         return np.sum(GMMerr ** 2)
 
     def _compute_irf(self, Bhat: np.ndarray, B1hat: np.ndarray,
-                     X: np.ndarray, lengthIRF: int = 50):
+                     X: np.ndarray, lengthIRF: int = 50, apply_scale: bool = True):
         """
         Compute impulse response functions.
 
@@ -399,7 +407,7 @@ class IVVAR:
                 IRF[t, :, varct] = IRFvec[:NX]
             # Scale: sqrt(var(X(:,varct))) * IRF / Bhat(varct,varct)
             # CRITICAL: MATLAB uses var() which has ddof=1 by default
-            if Bhat[varct, varct] != 0:
+            if apply_scale and Bhat[varct, varct] != 0:
                 IRF[:, :, varct] = (np.sqrt(np.var(X[:, varct], ddof=1)) *
                                     IRF[:, :, varct] / Bhat[varct, varct])
 
@@ -615,8 +623,8 @@ class IVVAR:
             'paramhat': paramhat,
         }
 
-    def bootstrap_se(self, baseline_result: dict, n_boot: int = 500,
-                     seed: int = 3991, block_size: int = 4):
+    def bootstrap_se(self, baseline_result: dict, n_boot: int = 150,
+                     seed: int = 3991, block_size: int = 25):
         """
         Stationary block bootstrap for standard errors.
 
@@ -625,7 +633,7 @@ class IVVAR:
         Parameters
         ----------
         baseline_result : output from estimate_baseline
-        n_boot : number of bootstrap replications (MATLAB uses 500)
+        n_boot : number of bootstrap replications (MATLAB uses 150)
         seed : random seed (MATLAB uses 3991)
         block_size : expected block size for geometric distribution
 
@@ -684,7 +692,8 @@ class IVVAR:
                     options={'maxiter': 50000, 'ftol': 1e-12, 'disp': False},
                 )
 
-                if not result.success:
+                min_obj = float(result.fun)
+                if (not result.success) or (min_obj > 4e-5):
                     boot_bad += 1
                     continue
 
@@ -697,11 +706,17 @@ class IVVAR:
                 # CRITICAL FIX: Scale factor matching MATLAB
                 # MATLAB: SCALEFACT = sqrt(var(X(:,varct))) / Bhat(varct,varct)
                 # We scale by the ratio of baseline to bootstrap variance
-                SCALEFACT = (np.sqrt(np.var(X[:, 2], ddof=1)) /
-                             np.sqrt(np.var(Xb[:, 2], ddof=1)) *
-                             baseline_result['Bhat'][2, 2] / Bhat_b[2, 2])
+                var_xb = np.var(Xb[:, 2], ddof=1)
+                if var_xb <= 1e-12 or abs(Bhat_b[2, 2]) <= 1e-10:
+                    boot_bad += 1
+                    continue
+                SCALEFACT = (
+                    np.sqrt(np.var(X[:, 2], ddof=1)) / np.sqrt(var_xb) *
+                    baseline_result['Bhat'][2, 2] / Bhat_b[2, 2]
+                )
 
-                IRF_b = self._compute_irf(Bhat_b, B1hat_b, Xb, self.lengthIRF)
+                # MATLAB BOOT/VAR.m computes unscaled IRFs then multiplies by SCALEFACT once.
+                IRF_b = self._compute_irf(Bhat_b, B1hat_b, Xb, self.lengthIRF, apply_scale=False)
                 IRF_b *= SCALEFACT
                 IRF_S_TO_Y_store[boot_ct] = IRF_b[:15, 0, 2]
                 Bhat_store[boot_ct] = Bhat_b
@@ -878,6 +893,28 @@ class IVVAR:
         print(f"  Saved {out_path}")
         return fig
 
+    def _run_spec(
+        self,
+        name: str,
+        nlags: int,
+        time_filter=None,
+        demean_country: bool = True,
+        demean_time: bool = True,
+    ):
+        """Run one IV-VAR specification using the MATLAB variant settings."""
+        print(f"\n--- Running spec: {name} ---")
+        old_lags = self.Nlags
+        self.Nlags = nlags
+        self._prepare_panel_data(
+            self.raw_data,
+            time_filter=time_filter,
+            demean_country=demean_country,
+            demean_time=demean_time,
+        )
+        out = self.estimate_baseline(seed=3991)
+        self.Nlags = old_lags
+        return out
+
     def run_all(self):
         """Run full IV-VAR estimation pipeline."""
         self.load_data()
@@ -886,19 +923,33 @@ class IVVAR:
         baseline = self.estimate_baseline()
 
         # Step 2: Bootstrap SEs
-        boot_se = self.bootstrap_se(baseline, n_boot=500, seed=3991, block_size=4)
+        boot_se = self.bootstrap_se(baseline, n_boot=150, seed=3991, block_size=25)
 
         # Step 3: Robustness checks
         results = {'BASELINE': baseline, 'BOOT_SE': boot_se}
 
-        # Early/Late sample splits would require data subsetting
-        # For now, run with modified lag structures
-        for nlags, name in [(2, 'FEWER_LAGS'), (4, 'MORE_LAGS')]:
-            orig_nlags = self.Nlags
-            self.Nlags = nlags
-            res = self.estimate_robustness(name=name, seed=3991)
-            results[name] = res
-            self.Nlags = orig_nlags
+        # MATLAB STEP1_ESTIMATION.m specs:
+        # EARLY, LATE, FEWER_LAGS, MORE_LAGS, NO_COUNTRY_FE, NO_TIME_FE
+        specs = [
+            ("EARLY", 3, lambda t: (t >= 69) & (t <= 128), True, True),
+            ("LATE", 3, lambda t: t >= 129, True, True),
+            ("FEWER_LAGS", 2, None, True, True),
+            ("MORE_LAGS", 12, None, True, True),
+            ("NO_COUNTRY_FE", 3, None, False, True),
+            ("NO_TIME_FE", 3, None, True, False),
+        ]
+        for name, nlags, tfilt, cfe, tfe in specs:
+            results[name] = self._run_spec(
+                name=name,
+                nlags=nlags,
+                time_filter=tfilt,
+                demean_country=cfe,
+                demean_time=tfe,
+            )
+
+        # Restore baseline-preprocessed arrays in memory for consistency.
+        self.Nlags = 3
+        self._prepare_panel_data(self.raw_data, None, True, True)
 
         # Step 4: Generate figures
         self.plot_figure6(baseline['IRF_S_TO_Y'], boot_se)

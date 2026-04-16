@@ -1,0 +1,9 @@
+module,metric,reference,python_value,delta,status
+IV,Table2 Col2 coef(cs_index_ret),Stata ivreg2 output,1.1968369823947853,N/A (no baseline file),run-ok
+IV,Table2 Col2 coef(cs_index_vol),Stata ivreg2 output,-4.236311645774647,N/A (no baseline file),run-ok
+IV_VAR,Baseline impact t=1,MATLAB VAR.m (negative GDP response),-0.09639310613254559,sign-ok,run-ok
+IV_VAR,Bootstrap SE finite check,finite SE vector,11.730568241937714,ok,run-ok
+LMN_VAR,Execution status,must run end-to-end,1.0,ok,run-ok
+LMN_VAR,Admissible share (5k draws),>0 often requires large N draws,0.0,0 at low N draws,warning
+MODEL,Moment RMSE (20 moments),0 (perfect match target),52.70503297603989,52.70503297603989,warning
+MODEL,Moment MAE (20 moments),0 (perfect match target),17.17993843917037,17.17993843917037,warning

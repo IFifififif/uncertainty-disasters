@@ -254,7 +254,12 @@ class MicroMacroModel:
         plt.close(fig)
         return fig
     
-    def run_all(self, do_estimation: bool = False):
+    def run_all(
+        self,
+        do_estimation: bool = False,
+        irf_T: int = 40,
+        irf_n_sims: int = 100,
+    ):
         """
         Run full model simulation pipeline.
         
@@ -289,7 +294,7 @@ class MicroMacroModel:
         self.build()
         self.solve()
         self.simulate()
-        self.compute_irf()
+        self.compute_irf(T=irf_T, n_sims=irf_n_sims)
         self.plot_figure8()
         
         if do_estimation:

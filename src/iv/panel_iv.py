@@ -226,8 +226,7 @@ class PanelIV:
         )
 
         if not cluster:
-            # Generate unique cluster per observation for heteroskedastic SEs
-            clusters = np.arange(len(y))
+            clusters = None
 
         result = iv2sls_with_cluster_se(
             y=y,

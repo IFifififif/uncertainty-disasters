@@ -70,6 +70,9 @@ class SimulationResults:
     
     # Distribution
     dist_zkl: Optional[np.ndarray] = None    # Distribution, shape (znum, numendog, T)
+    
+    # Optional event indicators used by GMM/IV moment construction
+    disaster_indicators: Optional[np.ndarray] = None  # shape (T, 4)
 
 
 @dataclass

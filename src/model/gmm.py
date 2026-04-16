@@ -20,6 +20,7 @@ from .params import ModelParameters
 from .grids import StateGrids, build_grids
 from .vfi import VFISolution, solve_vfi_simplified
 from .simulation import simulate_firms
+from .optimizer import PSOConfig, pso_optimize
 
 
 @dataclass
@@ -85,28 +86,173 @@ def compute_simulated_moments(
         T=T
     )
     
-    # Compute moments
+    # Build moments using the SAME column construction + OLS flow used by
+    # Fortran->MATLABdata.csv + FIRST_STAGE.m.
     moments = np.zeros(20)
-    
-    # First stage moments: impact of disasters on GDP growth and volatility
-    # This is a simplified computation - full version would run IV regression
-    
-    # For now, use disaster impacts directly
-    moments[0:4] = disaster_levels  # Levels impact, macro
-    moments[4:8] = disaster_unc_probs  # Vol impact, macro (simplified)
-    
-    # Second stage: impact of uncertainty on growth
-    # These come from running IV regression on simulated data
-    # Simplified: use parameter values
-    moments[8] = 1.5   # First moment coefficient (placeholder)
-    moments[9] = -3.0  # Second moment coefficient (placeholder)
-    
-    # Micro sample moments (similar structure)
-    moments[10:14] = disaster_levels * 1.2  # Scaled for micro
-    moments[14:18] = disaster_unc_probs * 0.8
-    moments[18] = 0.7
-    moments[19] = -8.0
-    
+    eps = 1e-10
+
+    # 1) Build a panel sample analogous to Fortran->MATLABdata bridge.
+    n_countries = max(1, int(getattr(params, 'Ncountries', 1)))
+    t_per = max(1, int(getattr(params, 'Tper', 1)))
+    start = int(getattr(params, 'numdiscard', 0))
+    n_keep = n_countries * t_per
+    end = min(len(sim_results.Y_sim), start + n_keep)
+    if end - start < 32:
+        return moments
+
+    y_level = sim_results.Y_sim.astype(np.float64)
+
+    inst_full = sim_results.disaster_indicators
+    if inst_full is None:
+        instruments_full = np.zeros((len(y_level), 4), dtype=np.float64)
+    else:
+        instruments_full = inst_full.astype(np.float64)
+
+    # 2) Reconstruct Fortran-style time series used to write MATLABdata.csv.
+    n_total = len(y_level)
+    growth_sim = np.zeros(n_total)
+    first_sim = np.zeros(n_total)
+    second_sim = np.zeros(n_total)
+    growth_sim_yr = np.zeros(n_total)
+    first_sim_yr = np.zeros(n_total)
+    second_sim_yr = np.zeros(n_total)
+
+    # Use model-implied public-firm returns when available; fallback to GDP growth proxy.
+    if getattr(sim_results, "returnfirm", None) is not None:
+        ret = np.asarray(sim_results.returnfirm, dtype=np.float64)
+        if ret.ndim == 2 and ret.shape[0] == n_total and ret.shape[1] > 0:
+            first_sim = np.nanmean(ret, axis=1)
+        else:
+            first_sim[1:] = np.log(np.clip(y_level[1:], eps, None) / np.clip(y_level[:-1], eps, None))
+    else:
+        first_sim[1:] = np.log(np.clip(y_level[1:], eps, None) / np.clip(y_level[:-1], eps, None))
+
+    # Fortran GDP growth: 100*log(Y_t / Y_{t-1})
+    growth_sim[1:] = 100.0 * np.log(np.clip(y_level[1:], eps, None) / np.clip(y_level[:-1], eps, None))
+
+    # Fortran second_sim before overwrite (quarterly variance proxy).
+    for t in range(3, n_total):
+        wnd = first_sim[t - 3:t + 1]
+        mu = np.mean(wnd)
+        v = np.mean(wnd ** 2) - mu ** 2
+        second_sim[t] = np.sqrt(max(v, 0.0))
+
+    # Annualized rolling averages.
+    for t in range(4, n_total):
+        second_sim_yr[t] = 0.25 * (second_sim[t] + second_sim[t - 1] + second_sim[t - 2] + second_sim[t - 3])
+        growth_sim_yr[t] = 0.25 * (growth_sim[t] + growth_sim[t - 1] + growth_sim[t - 2] + growth_sim[t - 3])
+        first_sim_yr[t] = 0.25 * (first_sim[t] + first_sim[t - 1] + first_sim[t - 2] + first_sim[t - 3])
+
+        # Fortran overwrite of SECONDsim(t): annual variance around 1% benchmark.
+        second_sim[t] = (
+            (first_sim[t] - 0.01) ** 2
+            + (first_sim[t - 1] - 0.01) ** 2
+            + (first_sim[t - 2] - 0.01) ** 2
+            + (first_sim[t - 3] - 0.01) ** 2
+        )
+
+    # Fortran overwrite of FIRSTsim(t) with annual average.
+    first_sim[4:] = first_sim_yr[4:]
+
+    # 3) Build DATAMAT rows exactly like Fortran MATLABdata.csv writer:
+    # growthsim at ct, but all RHS and instruments at ct-1.
+    rows = []
+    for c_idx in range(n_countries):
+        for t_idx in range(t_per):
+            ct = start + c_idx * t_per + t_idx
+            if ct <= 0 or ct >= n_total:
+                continue
+            lag = ct - 1
+            rows.append([
+                1.0,
+                growth_sim[ct],
+                growth_sim_yr[ct],
+                first_sim[lag],
+                second_sim[lag],
+                first_sim_yr[lag],
+                second_sim_yr[lag],
+                instruments_full[lag, 0] if lag < len(instruments_full) else 0.0,
+                instruments_full[lag, 1] if lag < len(instruments_full) else 0.0,
+                instruments_full[lag, 2] if lag < len(instruments_full) else 0.0,
+                instruments_full[lag, 3] if lag < len(instruments_full) else 0.0,
+                float(c_idx + 1),  # country code (1-based)
+                float(t_idx + 1),  # within-country time index (1-based)
+            ])
+
+    if len(rows) <= 30:
+        return moments
+    datamat = np.asarray(rows, dtype=np.float64)
+
+    # 4) FIRST_STAGE.m transforms.
+    def _std_pop(x: np.ndarray) -> float:
+        x = x[np.isfinite(x)]
+        if x.size <= 1:
+            return np.nan
+        return float(np.std(x, ddof=0))
+
+    sd4 = _std_pop(datamat[:, 3])
+    if np.isfinite(sd4) and sd4 > eps:
+        datamat[:, 3] /= sd4
+    sd6 = _std_pop(datamat[:, 5])
+    if np.isfinite(sd6) and sd6 > eps:
+        datamat[:, 5] /= sd6
+
+    datamat[:, 4] = np.log(np.clip(datamat[:, 4], eps, None))
+    sd5 = _std_pop(datamat[:, 4])
+    if np.isfinite(sd5) and sd5 > eps:
+        datamat[:, 4] /= sd5
+
+    datamat[:, 6] = np.log(np.clip(datamat[:, 6], eps, None))
+    sd7 = _std_pop(datamat[:, 6])
+    if np.isfinite(sd7) and sd7 > eps:
+        datamat[:, 6] /= sd7
+
+    # 5) Dummy matrices like MATLAB dummyvar (full set, no dropped base).
+    country = datamat[:, 11].astype(int)
+    time = datamat[:, 12].astype(int)
+    cc = np.eye(country.max(), dtype=np.float64)[country - 1]
+    tt = np.eye(time.max(), dtype=np.float64)[time - 1]
+
+    valid = np.isfinite(datamat[:, [2, 3, 4, 5, 6, 7, 8, 9, 10]]).all(axis=1)
+    if valid.sum() <= 20:
+        return moments
+    dm = datamat[valid]
+    ccv = cc[valid]
+    ttv = tt[valid]
+
+    Z = np.column_stack([dm[:, 7:11], ccv, ttv])
+
+    def _ols_coef(X: np.ndarray, y: np.ndarray) -> np.ndarray:
+        XtX = X.T @ X
+        Xty = X.T @ y
+        try:
+            return np.linalg.solve(XtX, Xty)
+        except np.linalg.LinAlgError:
+            return np.linalg.pinv(XtX) @ Xty
+
+    # Macro sample
+    beta_fm_macro = _ols_coef(Z, dm[:, 3])  # fret
+    beta_sm_macro = _ols_coef(Z, dm[:, 4])  # sretcs
+    fm_macro_hat = Z @ beta_fm_macro
+    sm_macro_hat = Z @ beta_sm_macro
+    X2_macro = np.column_stack([fm_macro_hat, sm_macro_hat, ccv, ttv])
+    beta2_macro = _ols_coef(X2_macro, dm[:, 2])  # growthsimyr
+
+    # Micro sample
+    beta_fm_micro = _ols_coef(Z, dm[:, 5])  # fretann
+    beta_sm_micro = _ols_coef(Z, dm[:, 6])  # srettsann
+    fm_micro_hat = Z @ beta_fm_micro
+    sm_micro_hat = Z @ beta_sm_micro
+    X2_micro = np.column_stack([fm_micro_hat, sm_micro_hat, ccv, ttv])
+    beta2_micro = _ols_coef(X2_micro, dm[:, 2])  # growthsimyr
+
+    moments[0:4] = beta_fm_macro[:4]
+    moments[4:8] = beta_sm_macro[:4]
+    moments[8:10] = beta2_macro[:2]
+    moments[10:14] = beta_fm_micro[:4]
+    moments[14:18] = beta_sm_micro[:4]
+    moments[18:20] = beta2_micro[:2]
+
     return moments
 
 
@@ -134,8 +280,8 @@ def simulate_firms_with_disasters(
     p = params
     g = grids
     
-    # Disaster probabilities
-    disaster_probs = np.array([0.242, 0.03, 0.011, 0.008])
+    # Disaster probabilities (Fortran DISASTERprobs)
+    disaster_probs = np.array([0.242, 0.03, 0.011, 0.008], dtype=np.float64)
     
     # CRITICAL FIX: Use RandomState matching Fortran's random_number
     rng = np.random.RandomState(2501)
@@ -143,10 +289,15 @@ def simulate_firms_with_disasters(
     # Exogenous states
     a_pos = np.zeros(T, dtype=int)
     s_pos = np.zeros(T, dtype=int)
-    disaster_occurred = np.zeros((T, 4), dtype=bool)
-    
-    a_pos[0] = p.anum // 2
-    s_pos[0] = 0
+    disaster_occurred = (rng.random((T, 4)) <= disaster_probs[None, :]).astype(np.float64)
+    achg_shocks = rng.random(T)
+    schg_shocks = rng.random(T)
+    a_shocks = rng.random(T)
+    s_shocks = rng.random(T)
+
+    a_pos[0] = max(0, min(p.anum - 1, p.ainit - 1))
+    s_pos[0] = max(0, min(p.snum - 1, p.sinit - 1))
+    erg_meana = float(np.mean(np.log(np.clip(g.a_grid, 1e-12, None))))
     
     # Aggregate variables
     Y_sim = np.zeros(T)
@@ -159,21 +310,40 @@ def simulate_firms_with_disasters(
     price = p.pval
     w = p.theta / price
     
-    for t in range(T):
-        # Check for disasters
-        for d in range(4):
-            if rng.random() < disaster_probs[d]:
-                disaster_occurred[t, d] = True
-                
-                # Apply disaster impact on productivity
-                # This reduces a in that period
-                a_val = g.a_grid[a_pos[t]] * (1 + disaster_levels[d])
-                
-                # Maybe increase uncertainty
-                if rng.random() < disaster_unc_probs[d]:
-                    s_pos[t] = 1
+    for t in range(1, T):
+        # Baseline uncertainty transition (from pr_mat_s), then disaster-induced switch.
+        pr_s = g.pr_mat_s[s_pos[t - 1], :]
+        s_pos[t] = int(np.searchsorted(np.cumsum(pr_s), s_shocks[t], side="right"))
+        s_pos[t] = min(max(s_pos[t], 0), p.snum - 1)
+
+        second_mom_prob = float(np.sum(disaster_occurred[t, :] * disaster_unc_probs))
+        second_mom_prob = min(max(second_mom_prob, 0.0), 1.0)
+        if schg_shocks[t] <= second_mom_prob:
+            s_pos[t] = 1
+
+        # Baseline aggregate productivity transition.
+        pr_a = g.pr_mat_a[a_pos[t - 1], :, s_pos[t - 1]]
+        a_pos[t] = int(np.searchsorted(np.cumsum(pr_a), a_shocks[t], side="right"))
+        a_pos[t] = min(max(a_pos[t], 0), p.anum - 1)
+
+        # Disaster first-moment effect (Fortran uncexogsim logic).
+        if disaster_occurred[t, :].sum() > 0.0:
+            tot_first_mom = float(p.sigmaa * np.sum(disaster_occurred[t, :] * disaster_levels))
+            if tot_first_mom >= 0.0:
+                denom = np.log(max(g.a_grid[-1], 1e-12)) - erg_meana
+                prob = (tot_first_mom / denom) if abs(denom) > 1e-12 else 0.0
+                prob = min(max(prob, 0.0), 1.0)
+                if achg_shocks[t] <= prob:
+                    a_pos[t] = p.anum - 1
             else:
-                a_val = g.a_grid[a_pos[t]]
+                denom = np.log(max(g.a_grid[0], 1e-12)) - erg_meana
+                prob = (tot_first_mom / denom) if abs(denom) > 1e-12 else 0.0
+                prob = min(max(prob, 0.0), 1.0)
+                if achg_shocks[t] <= prob:
+                    a_pos[t] = 0
+
+    for t in range(T):
+        a_val = g.a_grid[a_pos[t]]
         
         k = g.k_grid[k_idx]
         l = g.l_grid[l_idx]
@@ -193,17 +363,6 @@ def simulate_firms_with_disasters(
         
         k_idx = k_idx_next
         
-        # Transition aggregate productivity
-        if t < T - 1:
-            trans_probs = g.pr_mat_a[a_pos[t], :, s_pos[t]]
-            a_pos[t+1] = np.searchsorted(np.cumsum(trans_probs), rng.random())
-            
-            # Uncertainty transition
-            if rng.random() < g.pr_mat_s[s_pos[t], 1]:
-                s_pos[t+1] = 1
-            else:
-                s_pos[t+1] = 0
-    
     # Return simulation results
     from .simulation import SimulationResults
     return SimulationResults(
@@ -217,7 +376,8 @@ def simulate_firms_with_disasters(
         C_sim=Y_sim - I_sim,  # Consumption = Y - I
         p_sim=np.full(T, params.pval),  # Fixed price
         a_sim=a_pos,
-        s_sim=s_pos
+        s_sim=s_pos,
+        disaster_indicators=disaster_occurred,
     )
 
 
@@ -286,13 +446,14 @@ def estimate_gmm(
     grids: StateGrids = None,
     x_init: np.ndarray = None,
     max_evals: int = 100,
+    method: str = "pso",
+    pso_max_iter: int = 5000,
     verbose: bool = True
 ) -> GMMSolution:
     """
     Estimate model parameters via GMM.
     
-    Uses simplified optimization (Nelder-Mead) instead of PSO
-    for faster computation.
+    Uses PSO by default to match the original Fortran wrapper.
     
     Parameters
     ----------
@@ -342,25 +503,49 @@ def estimate_gmm(
         return gmm_objective(x, params, grids, data_moments, data_se, vfi_sol)
     
     # Optimize
-    result = minimize(
-        objective,
-        x_init,
-        method='L-BFGS-B',
-        bounds=bounds,
-        options={'maxiter': max_evals, 'disp': verbose}
-    )
+    method_l = method.lower()
+    if method_l == "pso":
+        # Fortran VOL_GROWTH_wrapper.f90:
+        # npart=75, phi=(2.05,2.05), seed=8791, maxpsoit=5000.
+        pso_cfg = PSOConfig(
+            npart=75,
+            max_iter=pso_max_iter,
+            x_tol=1e-3,
+            f_tol=1e-3,
+            x_quick_tol=1e-3,
+            x_quick_num=5,
+            phi=(2.05, 2.05),
+            seed=8791,
+        )
+        pso_res = pso_optimize(objective, lb, ub, config=pso_cfg, verbose=verbose)
+        x_opt = pso_res.x_opt
+        f_opt = float(pso_res.f_opt)
+        converged = bool(pso_res.converged)
+        iterations = int(pso_res.iterations)
+    else:
+        result = minimize(
+            objective,
+            x_init,
+            method='L-BFGS-B',
+            bounds=bounds,
+            options={'maxiter': max_evals, 'disp': verbose}
+        )
+        x_opt = result.x
+        f_opt = float(result.fun)
+        converged = bool(result.success)
+        iterations = int(result.nit)
     
     # Compute final moments
     final_moments = compute_simulated_moments(
         params, grids, vfi_sol,
-        result.x[0:4], result.x[4:8]
+        x_opt[0:4], x_opt[4:8]
     )
     
     return GMMSolution(
-        x_opt=result.x,
-        gmm_value=result.fun,
-        converged=result.success,
-        iterations=result.nit,
+        x_opt=x_opt,
+        gmm_value=f_opt,
+        converged=converged,
+        iterations=iterations,
         simulated_moments=final_moments,
         data_moments=data_moments
     )
