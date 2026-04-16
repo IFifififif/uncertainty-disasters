@@ -460,10 +460,13 @@ def simulate_all_firms(
     
     # Add noise to returns - CRITICAL FIX: use rng
     norm_shocks = rng.randn(T, p.nfirmspub)
-    # Fortran uses t=2..numper-1 (1-based) => idx 1..T-2 (0-based).
-    return_mean = np.mean(returnfirm[1:T-1, :])
-    # CRITICAL: use ddof=1 matching Stata/MATLAB
-    return_std = np.std(returnfirm[1:T-1, :], ddof=1)
+    # Fortran uses population moments over t=2..numper-1 (1-based),
+    # i.e. idx 1..T-2 (0-based), with divisor ct (not ct-1).
+    return_slice = returnfirm[1:T-1, :]
+    return_mean = np.mean(return_slice)
+    return_std = np.sqrt(np.mean(return_slice ** 2) - return_mean ** 2)
+    if not np.isfinite(return_std) or return_std < 0:
+        return_std = 0.0
     returnfirm_noise = returnfirm + return_std * norm_shocks
     returnfirmsd_noise = np.zeros_like(returnfirmsd)
 
