@@ -97,6 +97,9 @@ def run_lmn_var() -> dict:
         "n_admit": n_admit,
         "share": share,
         "impact_mean": float(out["IRF_med"][0, 2, 0]) if out.get("IRF_med") is not None else None,
+        "impact_lb_t1": float(out["IRF_admit_lb"][0, 2, 0]) if out.get("IRF_admit_lb") is not None else None,
+        "impact_ub_t1": float(out["IRF_admit_ub"][0, 2, 0]) if out.get("IRF_admit_ub") is not None else None,
+        "impact_maxg_t1": float(out["IRF_maxg"][0, 2, 0]) if out.get("IRF_maxg") is not None else None,
     }
 
 
