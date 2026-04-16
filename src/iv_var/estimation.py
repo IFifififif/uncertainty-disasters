@@ -393,17 +393,13 @@ class IVVAR:
         Btilde[:NX, :NX] = Bhat
 
         # Compute IRFs
-        # For t=0: IRF = B (contemporaneous impact)
-        # For t>0: IRF = B1^(t-1) @ B
+        # MATLAB uses: for t=1:lengthIRF, IRF_t = B1^(t-1) * B.
+        # With Python 0-based indexing, this maps to:
+        # t=0 -> B1^0 * B; t=1 -> B1^1 * B; ...
         IRF = np.zeros((lengthIRF, NX, NX))
         for varct in range(NX):
             for t in range(lengthIRF):
-                if t == 0:
-                    # Period 0: contemporaneous impact
-                    IRFvec = Btilde[:, varct]
-                else:
-                    # Period t: B1^(t-1) @ B
-                    IRFvec = np.linalg.matrix_power(B1tilde, t - 1) @ Btilde[:, varct]
+                IRFvec = np.linalg.matrix_power(B1tilde, t) @ Btilde[:, varct]
                 IRF[t, :, varct] = IRFvec[:NX]
             # Scale: sqrt(var(X(:,varct))) * IRF / Bhat(varct,varct)
             # CRITICAL: MATLAB uses var() which has ddof=1 by default
