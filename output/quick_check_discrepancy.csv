@@ -5,5 +5,5 @@ IV_VAR,Baseline impact t=1,MATLAB VAR.m (negative GDP response),-0.0963931061325
 IV_VAR,Bootstrap SE finite check,finite SE vector,9.725648250803081,ok,run-ok
 LMN_VAR,Execution status,must run end-to-end,1.0,ok,run-ok
 LMN_VAR,Admissible share (5k draws),>0 often requires large N draws,0.0038,ok,run-ok
-MODEL,Moment RMSE (20 moments),0 (perfect match target),8.538471374822413,8.538471374822413,run-ok
-MODEL,Moment MAE (20 moments),0 (perfect match target),5.005660578505475,5.005660578505475,warning
+MODEL,Moment RMSE (20 moments),0 (perfect match target),4.9236876854791145,4.9236876854791145,run-ok
+MODEL,Moment MAE (20 moments),0 (perfect match target),3.0206636381715617,3.0206636381715617,run-ok

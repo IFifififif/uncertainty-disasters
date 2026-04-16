@@ -67,6 +67,8 @@ class SimulationResults:
     dfirm: Optional[np.ndarray] = None       # Firm dividends, shape (T, nfirms)
     returnfirm: Optional[np.ndarray] = None  # Stock returns, shape (T, nfirmspub)
     returnfirmsd: Optional[np.ndarray] = None # Return volatility, shape (T, nfirmspub)
+    returnfirm_noise: Optional[np.ndarray] = None   # Noisy returns, shape (T, nfirmspub)
+    returnfirmsd_noise: Optional[np.ndarray] = None # Noisy return vol, shape (T, nfirmspub)
     
     # Distribution
     dist_zkl: Optional[np.ndarray] = None    # Distribution, shape (znum, numendog, T)
@@ -462,6 +464,17 @@ def simulate_all_firms(
     # CRITICAL: use ddof=1 matching Stata/MATLAB
     return_std = np.std(returnfirm[2:, :], ddof=1)
     returnfirm_noise = returnfirm + return_std * norm_shocks
+    returnfirmsd_noise = np.zeros_like(returnfirmsd)
+
+    # Recompute within-firm rolling return volatility using noisy returns
+    # (Fortran lines 1334-1340).
+    for t in range(3, T):
+        wnd = returnfirm_noise[t - 3:t + 1, :]
+        meanval = np.mean(wnd, axis=0)
+        sdval = np.mean(wnd ** 2, axis=0)
+        var = sdval - meanval ** 2
+        var[var < 0] = 0.0
+        returnfirmsd_noise[t, :] = np.sqrt(var)
     
     # =====================
     # Compute Aggregates
@@ -506,6 +519,8 @@ def simulate_all_firms(
         yfirm=yfirm, dfirm=dfirm,
         returnfirm=returnfirm[:, :p.nfirmspub],
         returnfirmsd=returnfirmsd[:, :p.nfirmspub],
+        returnfirm_noise=returnfirm_noise[:, :p.nfirmspub],
+        returnfirmsd_noise=returnfirmsd_noise[:, :p.nfirmspub],
         dist_zkl=dist_zkl,
         disaster_indicators=disaster_indicators,
     )

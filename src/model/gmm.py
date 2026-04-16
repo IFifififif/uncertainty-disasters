@@ -117,11 +117,21 @@ def compute_simulated_moments(
     first_sim_yr = np.zeros(n_total)
     second_sim_yr = np.zeros(n_total)
 
-    # Use model-implied public-firm returns when available; fallback to GDP growth proxy.
-    if getattr(sim_results, "returnfirm", None) is not None:
-        ret = np.asarray(sim_results.returnfirm, dtype=np.float64)
+    # Reconstruct FIRSTsim/SECONDsim from noisy public-firm returns
+    # as in VOL_GROWTH_wrapper.f90 (lines ~1352 onward).
+    ret_noise = getattr(sim_results, "returnfirm_noise", None)
+    if ret_noise is None:
+        ret_noise = getattr(sim_results, "returnfirm", None)
+    if ret_noise is not None:
+        ret = np.asarray(ret_noise, dtype=np.float64)
         if ret.ndim == 2 and ret.shape[0] == n_total and ret.shape[1] > 0:
-            first_sim = np.nanmean(ret, axis=1)
+            for t in range(1, n_total - 1):
+                r_t = ret[t, :]
+                first_t = np.mean(r_t)
+                second_t = np.mean(r_t ** 2)
+                var_t = max(second_t - first_t ** 2, 0.0)
+                first_sim[t] = first_t
+                second_sim[t] = np.sqrt(var_t)
         else:
             first_sim[1:] = np.log(np.clip(y_level[1:], eps, None) / np.clip(y_level[:-1], eps, None))
     else:
@@ -129,13 +139,6 @@ def compute_simulated_moments(
 
     # Fortran GDP growth: 100*log(Y_t / Y_{t-1})
     growth_sim[1:] = 100.0 * np.log(np.clip(y_level[1:], eps, None) / np.clip(y_level[:-1], eps, None))
-
-    # Fortran second_sim before overwrite (quarterly variance proxy).
-    for t in range(3, n_total):
-        wnd = first_sim[t - 3:t + 1]
-        mu = np.mean(wnd)
-        v = np.mean(wnd ** 2) - mu ** 2
-        second_sim[t] = np.sqrt(max(v, 0.0))
 
     # Annualized rolling averages.
     for t in range(4, n_total):
