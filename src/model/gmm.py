@@ -125,6 +125,7 @@ def compute_simulated_moments(
     if ret_noise is not None:
         ret = np.asarray(ret_noise, dtype=np.float64)
         if ret.ndim == 2 and ret.shape[0] == n_total and ret.shape[1] > 0:
+            # Fortran moment loop uses t=2..numper-1 (1-based) => idx 1..n_total-2.
             for t in range(1, n_total - 1):
                 r_t = ret[t, :]
                 first_t = np.mean(r_t)
@@ -141,7 +142,8 @@ def compute_simulated_moments(
     growth_sim[1:] = 100.0 * np.log(np.clip(y_level[1:], eps, None) / np.clip(y_level[:-1], eps, None))
 
     # Annualized rolling averages.
-    for t in range(4, n_total):
+    # Fortran annual loops: t=5..numper-1 (1-based) => idx 4..n_total-2 (0-based).
+    for t in range(4, n_total - 1):
         second_sim_yr[t] = 0.25 * (second_sim[t] + second_sim[t - 1] + second_sim[t - 2] + second_sim[t - 3])
         growth_sim_yr[t] = 0.25 * (growth_sim[t] + growth_sim[t - 1] + growth_sim[t - 2] + growth_sim[t - 3])
         first_sim_yr[t] = 0.25 * (first_sim[t] + first_sim[t - 1] + first_sim[t - 2] + first_sim[t - 3])
@@ -155,17 +157,21 @@ def compute_simulated_moments(
         )
 
     # Fortran overwrite of FIRSTsim(t) with annual average.
-    first_sim[4:] = first_sim_yr[4:]
+    first_sim[4:n_total - 1] = first_sim_yr[4:n_total - 1]
 
     # 3) Build DATAMAT rows exactly like Fortran MATLABdata.csv writer:
     # growthsim at ct, but all RHS and instruments at ct-1.
     rows = []
     for c_idx in range(n_countries):
-        for t_idx in range(t_per):
-            ct = start + c_idx * t_per + t_idx
-            if ct <= 0 or ct >= n_total:
+        for t_idx in range(1, t_per + 1):
+            # Fortran: ct = numdiscard + (countryct-1)*Tper + t   (1-based)
+            ct_f = start + c_idx * t_per + t_idx
+            if ct_f >= n_total:
                 continue
-            lag = ct - 1
+            ct = ct_f - 1      # python index for ct_f
+            lag = ct_f - 2     # python index for (ct_f - 1)
+            if lag < 0:
+                continue
             rows.append([
                 1.0,
                 growth_sim[ct],
@@ -179,7 +185,7 @@ def compute_simulated_moments(
                 instruments_full[lag, 2] if lag < len(instruments_full) else 0.0,
                 instruments_full[lag, 3] if lag < len(instruments_full) else 0.0,
                 float(c_idx + 1),  # country code (1-based)
-                float(t_idx + 1),  # within-country time index (1-based)
+                float(t_idx),      # within-country time index (1-based)
             ])
 
     if len(rows) <= 30:

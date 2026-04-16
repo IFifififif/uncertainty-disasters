@@ -289,7 +289,7 @@ def compute_stock_returns(
     returnfirmsd = np.zeros((T, n_firms_pub))
     
     for firm in prange(n_firms_pub):
-        for t in range(2, T):
+        for t in range(1, T):
             # Return = log(v_t / (v_{t-1} - d_{t-1}))
             # Fortran line 1293
             denominator = vfirm[t - 1, firm] - dfirm[t - 1, firm]
@@ -460,15 +460,17 @@ def simulate_all_firms(
     
     # Add noise to returns - CRITICAL FIX: use rng
     norm_shocks = rng.randn(T, p.nfirmspub)
-    return_mean = np.mean(returnfirm[2:, :])
+    # Fortran uses t=2..numper-1 (1-based) => idx 1..T-2 (0-based).
+    return_mean = np.mean(returnfirm[1:T-1, :])
     # CRITICAL: use ddof=1 matching Stata/MATLAB
-    return_std = np.std(returnfirm[2:, :], ddof=1)
+    return_std = np.std(returnfirm[1:T-1, :], ddof=1)
     returnfirm_noise = returnfirm + return_std * norm_shocks
     returnfirmsd_noise = np.zeros_like(returnfirmsd)
 
     # Recompute within-firm rolling return volatility using noisy returns
     # (Fortran lines 1334-1340).
-    for t in range(3, T):
+    # Fortran loop t=4..numper-1 (1-based) => idx 3..T-2 (0-based).
+    for t in range(3, T - 1):
         wnd = returnfirm_noise[t - 3:t + 1, :]
         meanval = np.mean(wnd, axis=0)
         sdval = np.mean(wnd ** 2, axis=0)
