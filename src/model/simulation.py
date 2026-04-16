@@ -314,7 +314,10 @@ def simulate_all_firms(
     vfi_sol: VFISolution,
     T: int = None,
     seed: int = 2501,
-    verbose: bool = True
+    verbose: bool = True,
+    a_pos_override: Optional[np.ndarray] = None,
+    s_pos_override: Optional[np.ndarray] = None,
+    disaster_indicators: Optional[np.ndarray] = None,
 ) -> SimulationResults:
     """
     Run complete multi-firm simulation.
@@ -378,29 +381,38 @@ def simulate_all_firms(
     # =====================
     # Simulate Exogenous Processes
     # =====================
-    a_pos = np.zeros(T, dtype=int)
-    s_pos = np.zeros(T, dtype=int)
-    
-    a_pos[0] = p.ainit - 1
-    s_pos[0] = p.sinit - 1
-    
-    # Random shocks - CRITICAL FIX: use rng instead of np.random
-    a_shocks = rng.random(T)
-    s_shocks = rng.random(T)
-    z_shocks = rng.random((T, p.nfirms))
-    
-    # Simulate exogenous processes
-    for t in range(1, T):
-        # Uncertainty transition
-        if s_shocks[t] < g.pr_mat_s[s_pos[t-1], 1]:
-            s_pos[t] = 1
-        else:
-            s_pos[t] = 0
+    if a_pos_override is not None and s_pos_override is not None:
+        a_pos = np.asarray(a_pos_override, dtype=int).copy()
+        s_pos = np.asarray(s_pos_override, dtype=int).copy()
+        if len(a_pos) != T or len(s_pos) != T:
+            raise ValueError("Override exogenous paths must have length T")
+        a_pos = np.clip(a_pos, 0, p.anum - 1)
+        s_pos = np.clip(s_pos, 0, p.snum - 1)
+    else:
+        a_pos = np.zeros(T, dtype=int)
+        s_pos = np.zeros(T, dtype=int)
         
-        # Productivity transition
-        trans_probs = g.pr_mat_a[a_pos[t-1], :, s_pos[t]]
-        a_pos[t] = np.searchsorted(np.cumsum(trans_probs), a_shocks[t])
-        a_pos[t] = min(a_pos[t], p.anum - 1)
+        a_pos[0] = p.ainit - 1
+        s_pos[0] = p.sinit - 1
+        
+        # Random shocks - CRITICAL FIX: use rng instead of np.random
+        a_shocks = rng.random(T)
+        s_shocks = rng.random(T)
+        
+        # Simulate exogenous processes
+        for t in range(1, T):
+            # Uncertainty transition
+            if s_shocks[t] < g.pr_mat_s[s_pos[t-1], 1]:
+                s_pos[t] = 1
+            else:
+                s_pos[t] = 0
+            
+            # Productivity transition
+            trans_probs = g.pr_mat_a[a_pos[t-1], :, s_pos[t]]
+            a_pos[t] = np.searchsorted(np.cumsum(trans_probs), a_shocks[t])
+            a_pos[t] = min(a_pos[t], p.anum - 1)
+
+    z_shocks = rng.random((T, p.nfirms))
     
     # Simulate firm productivity
     simulate_firm_exog(
@@ -494,7 +506,8 @@ def simulate_all_firms(
         yfirm=yfirm, dfirm=dfirm,
         returnfirm=returnfirm[:, :p.nfirmspub],
         returnfirmsd=returnfirmsd[:, :p.nfirmspub],
-        dist_zkl=dist_zkl
+        dist_zkl=dist_zkl,
+        disaster_indicators=disaster_indicators,
     )
 
 

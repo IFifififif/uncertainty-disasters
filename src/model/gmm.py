@@ -299,17 +299,6 @@ def simulate_firms_with_disasters(
     s_pos[0] = max(0, min(p.snum - 1, p.sinit - 1))
     erg_meana = float(np.mean(np.log(np.clip(g.a_grid, 1e-12, None))))
     
-    # Aggregate variables
-    Y_sim = np.zeros(T)
-    K_sim = np.zeros(T)
-    I_sim = np.zeros(T)
-    
-    k_idx = p.knum // 2
-    l_idx = p.lnum // 2
-    
-    price = p.pval
-    w = p.theta / price
-    
     for t in range(1, T):
         # Baseline uncertainty transition (from pr_mat_s), then disaster-induced switch.
         pr_s = g.pr_mat_s[s_pos[t - 1], :]
@@ -342,43 +331,20 @@ def simulate_firms_with_disasters(
                 if achg_shocks[t] <= prob:
                     a_pos[t] = 0
 
-    for t in range(T):
-        a_val = g.a_grid[a_pos[t]]
-        
-        k = g.k_grid[k_idx]
-        l = g.l_grid[l_idx]
-        
-        K_sim[t] = k
-        Y_sim[t] = a_val * (k ** p.alpha) * (l ** p.nu)
-        
-        # Policy lookup
-        endog_idx = k_idx * p.lnum + l_idx
-        exog_idx = a_pos[t] * p.snum * p.snum + s_pos[t] * p.snum + s_pos[t]
-        
-        pol_idx = vfi_sol.polmat[endog_idx % g.numendog, exog_idx % g.numexog, 0]
-        k_idx_next = g.endog_pos[pol_idx % g.numendog, 0]
-        
-        k_next = g.k_grid[k_idx_next]
-        I_sim[t] = k_next - (1 - p.deltak) * k
-        
-        k_idx = k_idx_next
-        
-    # Return simulation results
-    from .simulation import SimulationResults
-    return SimulationResults(
-        Y_sim=Y_sim,
-        K_sim=K_sim,
-        L_sim=np.zeros(T),
-        I_sim=I_sim,
-        H_sim=np.zeros(T),
-        ACk_sim=np.zeros(T),
-        ACl_sim=np.zeros(T),  # Labor adjustment costs
-        C_sim=Y_sim - I_sim,  # Consumption = Y - I
-        p_sim=np.full(T, params.pval),  # Fixed price
-        a_sim=a_pos,
-        s_sim=s_pos,
+    # Run the full simulation stack with exogenous paths overridden by
+    # Fortran-style disaster-adjusted (a,s) paths.
+    sim_results = simulate_firms(
+        params,
+        grids,
+        vfi_sol,
+        T=T,
+        seed=2501,
+        verbose=False,
+        a_pos_override=a_pos,
+        s_pos_override=s_pos,
         disaster_indicators=disaster_occurred,
     )
+    return sim_results
 
 
 def gmm_objective(
