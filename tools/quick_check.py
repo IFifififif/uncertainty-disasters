@@ -2,14 +2,18 @@
 """
 Lightweight cross-module consistency check.
 
-This script runs a small, reproducible subset of each module and writes:
+This script runs a small, reproducible subset of each module and writes
+machine-readable output by default:
 1) output/quick_check_metrics.json
-2) output/quick_check_discrepancy.csv
-3) output/quick_check_discrepancy.md
+
+Optional human-readable exports can be enabled with flags:
+- --write-csv : output/quick_check_discrepancy.csv
+- --write-md  : output/quick_check_discrepancy.md
 """
 
 from __future__ import annotations
 
+import argparse
 import json
 import time
 from pathlib import Path
@@ -44,7 +48,7 @@ def run_iv() -> dict:
     t0 = time.time()
     iv = PanelIV()
     iv.load_data()
-    t2 = iv.table2_baseline()
+    t2 = iv.table2_baseline(save_output=False)
     col2 = t2["col2_iv"]
     return {
         "ok": True,
@@ -105,10 +109,11 @@ def run_lmn_var() -> dict:
 
 def run_model() -> dict:
     t0 = time.time()
+    # Keep quick-check runtime bounded; this is not the full paper run.
     model = MicroMacroModel(simplified=True)
     model.build()
     model.solve(verbose=False)
-    model.compute_irf(T=40, n_sims=100)
+    model.compute_irf(T=40, n_sims=10)
 
     p = model.params
     sim_mom = compute_simulated_moments(
@@ -214,6 +219,19 @@ def build_discrepancy(metrics: dict) -> pd.DataFrame:
 
 
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--write-csv",
+        action="store_true",
+        help="also write discrepancy CSV report",
+    )
+    parser.add_argument(
+        "--write-md",
+        action="store_true",
+        help="also write discrepancy Markdown report",
+    )
+    args = parser.parse_args()
+
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
     metrics = {}
@@ -227,16 +245,19 @@ def main():
         json.dump(metrics, f, indent=2, ensure_ascii=False)
 
     disc = build_discrepancy(metrics)
-    disc.to_csv(DISCREPANCY_CSV, index=False)
-
-    with DISCREPANCY_MD.open("w", encoding="utf-8") as f:
-        f.write("# Quick Check Discrepancy Table\n\n")
-        f.write(disc.to_markdown(index=False))
-        f.write("\n")
+    if args.write_csv:
+        disc.to_csv(DISCREPANCY_CSV, index=False)
+    if args.write_md:
+        with DISCREPANCY_MD.open("w", encoding="utf-8") as f:
+            f.write("# Quick Check Discrepancy Table\n\n")
+            f.write(disc.to_markdown(index=False))
+            f.write("\n")
 
     print(f"Wrote {METRICS_JSON}")
-    print(f"Wrote {DISCREPANCY_CSV}")
-    print(f"Wrote {DISCREPANCY_MD}")
+    if args.write_csv:
+        print(f"Wrote {DISCREPANCY_CSV}")
+    if args.write_md:
+        print(f"Wrote {DISCREPANCY_MD}")
 
 
 if __name__ == "__main__":

@@ -18,8 +18,12 @@ from dataclasses import dataclass
 
 from .params import ModelParameters
 from .grids import StateGrids, build_grids, build_tauchen_transition_sv
-from .vfi import VFISolution, solve_vfi_simplified
-from .simulation import simulate_firms
+from .vfi import VFISolution, solve_vfi
+from .simulation import (
+    simulate_firms,
+    draw_uniform_matrix_fortran,
+    box_muller_matrix_from_uniforms,
+)
 from .optimizer import PSOConfig, pso_optimize
 
 
@@ -219,25 +223,21 @@ def compute_simulated_moments(
     # 5) Dummy matrices like MATLAB dummyvar (full set, no dropped base).
     country = datamat[:, 11].astype(int)
     time = datamat[:, 12].astype(int)
-    cc = np.eye(country.max(), dtype=np.float64)[country - 1]
-    tt = np.eye(time.max(), dtype=np.float64)[time - 1]
+    _, c_idx = np.unique(country, return_inverse=True)
+    _, t_idx = np.unique(time, return_inverse=True)
+    cc = np.eye(c_idx.max() + 1, dtype=np.float64)[c_idx]
+    tt = np.eye(t_idx.max() + 1, dtype=np.float64)[t_idx]
 
-    valid = np.isfinite(datamat[:, [2, 3, 4, 5, 6, 7, 8, 9, 10]]).all(axis=1)
-    if valid.sum() <= 20:
-        return moments
-    dm = datamat[valid]
-    ccv = cc[valid]
-    ttv = tt[valid]
+    dm = datamat
+    ccv = cc
+    ttv = tt
 
     Z = np.column_stack([dm[:, 7:11], ccv, ttv])
 
     def _ols_coef(X: np.ndarray, y: np.ndarray) -> np.ndarray:
-        XtX = X.T @ X
-        Xty = X.T @ y
-        try:
-            return np.linalg.solve(XtX, Xty)
-        except np.linalg.LinAlgError:
-            return np.linalg.pinv(XtX) @ Xty
+        # MATLAB "\" semantics: least-squares solution.
+        coef, *_ = np.linalg.lstsq(X, y, rcond=None)
+        return coef
 
     # Macro sample
     beta_fm_macro = _ols_coef(Z, dm[:, 3])  # fret
@@ -298,11 +298,24 @@ def simulate_firms_with_disasters(
     # Exogenous states
     a_pos = np.zeros(T, dtype=int)
     s_pos = np.zeros(T, dtype=int)
-    disaster_occurred = (rng.random((T, 4)) <= disaster_probs[None, :]).astype(np.float64)
-    achg_shocks = rng.random(T)
-    schg_shocks = rng.random(T)
+
+    # Fortran draw order:
+    # asimshocks, ssimshocks, DISASTERshocks, achgshocks, schgshocks, ascorrshocks,
+    # zfirmshocks, pfirmshocks, ushocks1, ushocks2.
     a_shocks = rng.random(T)
     s_shocks = rng.random(T)
+    disaster_shocks = draw_uniform_matrix_fortran(rng, T, 4)
+    disaster_occurred = (disaster_shocks <= disaster_probs[None, :]).astype(np.float64)
+    achg_shocks = rng.random(T)
+    schg_shocks = rng.random(T)
+    ascorr_shocks = rng.random(T)
+
+    z_shocks = draw_uniform_matrix_fortran(rng, T, p.nfirms)
+    _pfirm_shocks = draw_uniform_matrix_fortran(rng, T, p.nfirms)  # consume stream, unused
+    ushocks1 = draw_uniform_matrix_fortran(rng, T, p.nfirms)
+    ushocks2 = draw_uniform_matrix_fortran(rng, T, p.nfirms)
+    norm_full = box_muller_matrix_from_uniforms(ushocks1, ushocks2)
+    norm_pub = norm_full[:, :p.nfirmspub]
 
     a_pos[0] = max(0, min(p.anum - 1, p.ainit - 1))
     s_pos[0] = max(0, min(p.snum - 1, p.sinit - 1))
@@ -311,7 +324,7 @@ def simulate_firms_with_disasters(
     # 1) adjust uncfreq downward by disaster-induced high-unc probability
     # 2) compute meanshifta and rebuild pr_mat_a with that mean shift
     highuncerg = p.uncfreq / (1.0 + p.uncfreq - p.uncpers)
-    firstsecondprob = 0.0  # Fortran default in wrapper
+    firstsecondprob = float(getattr(p, "firstsecondprob", 0.0))
     meanshifta = -(
         p.sigmaa * float(np.sum(disaster_probs * disaster_levels))
         + highuncerg * firstsecondprob * np.log(max(p.amin, 1e-12))
@@ -381,6 +394,11 @@ def simulate_firms_with_disasters(
                 if achg_shocks[t] <= prob:
                     a_pos[t] = 0
 
+        # Correlated first/second-moment shock block from Fortran:
+        # if ((ascorrshocks(t)<=firstsecondprob).and.(ssimpos(t)==2)) asimpos(t)=1
+        if (ascorr_shocks[t] <= firstsecondprob) and (s_pos[t] == 1):
+            a_pos[t] = 0
+
     # Run the full simulation stack with exogenous paths overridden by
     # Fortran-style disaster-adjusted (a,s) paths.
     sim_results = simulate_firms(
@@ -392,6 +410,8 @@ def simulate_firms_with_disasters(
         verbose=False,
         a_pos_override=a_pos,
         s_pos_override=s_pos,
+        z_shocks_override=z_shocks,
+        norm_shocks_override=norm_pub,
         disaster_indicators=disaster_occurred,
     )
     return sim_results
@@ -440,9 +460,9 @@ def gmm_objective(
     if np.any(disaster_unc_probs < 0) or np.any(disaster_unc_probs > 1):
         return 1e10  # Penalty for invalid probabilities
     
-    # Solve VFI if not provided
+    # Solve VFI if not provided. For fidelity, default to full VFI routine.
     if vfi_sol is None:
-        vfi_sol = solve_vfi_simplified(params, grids, verbose=False)
+        vfi_sol = solve_vfi(params, grids, verbose=False)
     
     # Compute simulated moments
     sim_moments = compute_simulated_moments(
@@ -511,8 +531,8 @@ def estimate_gmm(
         print(f"  Initial parameters: {x_init}")
         print(f"  Data moments: {data_moments}")
     
-    # Solve VFI once (simplified for speed)
-    vfi_sol = solve_vfi_simplified(params, grids, verbose=False)
+    # Solve VFI once (full routine, matching original code structure).
+    vfi_sol = solve_vfi(params, grids, verbose=False)
     
     # Objective function
     def objective(x):

@@ -411,11 +411,28 @@ class IVVAR:
 
     def _initial_params(self):
         """Return initial parameter guess (matching MATLAB)."""
+        # MATLAB VAR.m paramguess (1-based indexing):
+        # [1,0,0, 0,1,0, 0,0,1, -1,-1,-1,-1, 0,1,1,1] * 0.25
         p = np.zeros(self.Nparams)
-        p[0] = 1; p[5] = 1; p[8] = 1  # B diagonal
-        p[9:13] = -1  # Dcoeff col 1
-        p[14:17] = 1  # Dcoeff col 2 (first 3)
-        p[13] = 0    # Dcoeff(4,1)
+        # B matrix entries x1..x9
+        p[0] = 1.0   # x1
+        p[1] = 0.0   # x2
+        p[2] = 0.0   # x3
+        p[3] = 0.0   # x4
+        p[4] = 1.0   # x5
+        p[5] = 0.0   # x6
+        p[6] = 0.0   # x7
+        p[7] = 0.0   # x8
+        p[8] = 1.0   # x9
+        # Dcoeff entries x10..x17
+        p[9] = -1.0    # x10
+        p[10] = -1.0   # x11
+        p[11] = -1.0   # x12
+        p[12] = -1.0   # x13
+        p[13] = 0.0    # x14
+        p[14] = 1.0    # x15
+        p[15] = 1.0    # x16
+        p[16] = 1.0    # x17
         return 0.25 * p
 
     def _solve_gmm(

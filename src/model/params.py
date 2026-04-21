@@ -132,6 +132,7 @@ class ModelParameters:
     shockperIRF: int = 45      # Period to shock (Fortran: shockperIRF = 45)
     shocklengthIRF: int = 5    # Duration of low unc (Fortran: shocklengthIRF = 5)
     numdiscIRF: int = 45       # IRF burn-in (Fortran: numdiscIRF = 45)
+    singleshock: int = 1       # Fortran: 1=single high-unc shock, 0=low-unc then high-unc
     
     # =====================
     # Disaster Parameters (for GMM)
@@ -206,15 +207,40 @@ class ModelParameters:
     
     # Disaster probabilities (from data)
     disaster_probs: np.ndarray = field(default_factory=lambda: np.array([0.242, 0.03, 0.011, 0.008]))
+    firstsecondprob: float = 0.0  # Fortran wrapper default used in meanshift term
     
-    def __post_init__(self):
-        """Compute derived quantities after initialization."""
+    def _refresh_derived(self):
+        """Compute derived quantities after initialization/parameter updates."""
         # Compute grid bounds based on parameters
         self.zmin = np.exp(-2.5 * np.sqrt(self.sigmaz**2 / (1 - self.rhoz**2)))
         self.zmax = np.exp(2.5 * np.sqrt(self.sigmaz**2 / (1 - self.rhoz**2)))
         
         # Compute high uncertainty ergodic probability
         self.highuncerg = self.uncfreq / (1.0 + self.uncfreq - self.uncpers)
+        # Fortran meanshift construction in VOL_GROWTH_wrapper.f90
+        dis_lev = np.array([
+            self.disaster_levels['nat_dis'],
+            self.disaster_levels['pol_shock'],
+            self.disaster_levels['revolution'],
+            self.disaster_levels['terrorist'],
+        ], dtype=float)
+        self.meanshifta = -(
+            self.sigmaa * float(np.sum(self.disaster_probs * dis_lev))
+            + self.highuncerg * self.firstsecondprob * np.log(max(self.amin, 1e-12))
+        )
+        # Fortran adjusts low->high uncertainty probability by disaster-induced jumps.
+        dis_unc = np.array([
+            self.disaster_unc_probs['nat_dis'],
+            self.disaster_unc_probs['pol_shock'],
+            self.disaster_unc_probs['revolution'],
+            self.disaster_unc_probs['terrorist'],
+        ], dtype=float)
+        self.uncfreq_adj = float(self.uncfreq - np.sum(self.disaster_probs * dis_unc))
+        self.uncfreq_adj = min(max(self.uncfreq_adj, 1e-8), 1.0 - 1e-8)
+
+    def __post_init__(self):
+        """Compute derived quantities after initialization."""
+        self._refresh_derived()
     
     def get_data_moments(self) -> np.ndarray:
         """Return combined data moments vector (20 moments)."""
@@ -250,6 +276,7 @@ class ModelParameters:
         self.disaster_unc_probs['pol_shock'] = x[5]
         self.disaster_unc_probs['revolution'] = x[6]
         self.disaster_unc_probs['terrorist'] = x[7]
+        self._refresh_derived()
     
     def get_param_bounds(self) -> Tuple[np.ndarray, np.ndarray]:
         """Return lower and upper bounds for optimization."""

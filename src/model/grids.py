@@ -115,7 +115,7 @@ def build_grids(params: ModelParameters) -> StateGrids:
     a_grid = np.linspace(p.amin, p.amax, p.anum)
     pr_mat_a = build_tauchen_transition_sv(
         a_grid, p.anum, p.rhoa, sigmaa_grid, p.snum,
-        meanshift=0.0  # Base case; adjusted during simulation
+        meanshift=float(getattr(p, "meanshifta", 0.0))
     )
     
     # =====================
@@ -123,7 +123,8 @@ def build_grids(params: ModelParameters) -> StateGrids:
     # =====================
     # Fortran lines 509-510
     pr_mat_s = np.zeros((p.snum, p.snum))
-    pr_mat_s[0, :] = [1 - p.uncfreq, p.uncfreq]
+    uncfreq = float(getattr(p, "uncfreq_adj", p.uncfreq))
+    pr_mat_s[0, :] = [1 - uncfreq, uncfreq]
     pr_mat_s[0, :] /= pr_mat_s[0, :].sum()
     pr_mat_s[1, :] = [1 - p.uncpers, p.uncpers]
     pr_mat_s[1, :] /= pr_mat_s[1, :].sum()

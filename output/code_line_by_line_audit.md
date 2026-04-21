@@ -1,0 +1,1234 @@
+# Code Line-by-Line Audit (Fresh)
+
+## 1) Direct Mapped Files (Detailed)
+
+### src/iv/panel_iv.py  vs  original codes and data/panel_iv.py
+
+- Similarity: `0.8371`
+- Line count (new/old): `928/814`
+- Common defs: `16`
+- New-only defs (2): `_compute_residualized_std, _scale_to_residualized_unit_std`
+- Old-only defs (0): ``
+- Diff preview:
+```diff
+--- original codes and data/panel_iv.py
++++ src/iv/panel_iv.py
+@@ -23,4 +23,5 @@
+     iv2sls_with_cluster_se,
+     ols_with_cluster_se,
++    areg_ols,
+     get_cc_yy_cols,
+     format_coef_table,
+@@ -37,7 +38,31 @@
+     - cc* for country dummies, yy* for time dummies
+     - partial(yy* cc*) to partial out FE in IV
++
++    Paper description (p.728):
++    "The first-and second-moment series are scaled for comparability across 
++    columns to have residualized unit standard deviation over the regression sample."
++    
++    This means variables should be scaled so that after partialling out FE,
++    they have unit standard deviation.
+     """
+ 
+-    def __init__(self, data_path: str = None):
++    def __init__(self, data_path: str = None, standardize_residualized: str = 'none'):
++        """
++        Initialize Panel IV regressions.
++        
++        Parameters
++        ----------
++        data_path : str, optional
++            Path to the Stata data file.
++        standardize_residualized : str, optional
++            How to scale variables:
++            - 'none': No scaling (default)
++            - 'semi': Scale X to residualized unit std, y unchanged
++            - 'full': Scale both X and y to residualized unit std (beta coefficients)
++        
++        Paper (p.728): "The first-and second-moment series are scaled for 
++        comparability across columns to have residualized unit standard deviation 
++        over the regression sample."
++        """
+         if data_path is None:
+             data_path = PROJECT_ROOT / "data" / "IV" / "panel_iv_data.dta"
+@@ -46,4 +71,11 @@
+         self.output_dir = PROJECT_ROOT / "output" / "tables"
+         self.output_dir.mkdir(parents=True, exist_ok=True)
++        
++        # How to scale variables to residualized unit standard deviation
++        # 'none': No scaling
++        # 'semi': Scale X only (semi-standardized)
++        # 'full': Scale both X and y (beta coefficients)
++        self.standardize_residualized = standardize_residualized
++        self._resid_stds = {}  # Store residualized stds for reporting
+ 
+         # IV instrument sets (matching Stata globals)
+@@ -84,4 +116,44 @@
+         return partial, cc_cols, yy_cols
+ 
++    def _compute_residualized_std(self, x: np.ndarray, partial: np.ndarray) -> float:
++        """
++        Compute residualized standard deviation.
++        
++        Paper (p.728): "scaled to have residualized unit standard deviation"
++        This means: std(x - Px @ x) where P is the projection matrix for FE.
++        
++        CRITICAL: Stata uses ddof=1 for standard deviation calculation.
++        """
++        # QR decomposition for numerical stability
++        Q, R = np.linalg.qr(partial, mode='reduced')
++        diag_R = np.abs(np.diag(R))
++        rank = np.sum(diag_R > 1e-10 * diag_R[0])
++        Q_rank = Q[:, :rank]
++        Px = Q_rank @ Q_rank.T
++        
++        # Residualize
++        x_resid = x - Px @ x
++        # CRITICAL: Use ddof=1 to match Stata's sd() function
++        return np.std(x_resid, ddof=1)
++
++    def _scale_to_residualized_unit_std(
++        self, 
++        x: np.ndarray, 
++        partial: np.ndarray,
++        var_name: str = None
++    ) -> tuple:
++        """
++        Scale variable to have residualized unit standard deviation.
++        
++        Returns: (x_scaled, residualized_std)
++        """
++        rstd = self._compute_residualized_std(x, partial)
++        if var_name:
++            self._resid_stds[var_name] = rstd
++        if rstd > 1e-10:
++            return x / rstd, rstd
++        else:
++            return x, rstd
++
+     def _prepare_iv_regression(
+         self,
+@@ -96,4 +168,7 @@
+ 
+         Handles missing values, builds arrays for iv2sls.
++        
++        If self.standardize_residualized is True, scales endogenous variables
++        to have residualized unit standard deviation (matching paper description).
+         """
+         data = df.copy()
+@@ -117,4 +192,19 @@
+         # Partial out FE (cc* and yy*)
+         partial, _, _ = self._get_fe_arrays(data)
++        
++        # Scale to residualized unit std if requested
++        # Paper (p.728): "scaled to have residualized unit standard deviation"
++        if self.standardize_residualized in ['semi', 'full']:
++            # Scale y (only for 'full' mode)
++            if self.standardize_residualized == 'full':
++                y, y_rstd = self._scale_to_residualized_unit_std(y, partial, 'ydgdp')
++            
++            # Scale each endogenous variable (for both 'semi' and 'full')
++            X_endog_scaled = np.zeros_like(X_endog)
++            for i, var in enumerate(endog_vars):
++                X_endog_scaled[:, i], _ = self._scale_to_residualized_unit_std(
++                    X_endog[:, i], partial, var
++                )
++            X_endog = X_endog_scaled
+ 
+         return y, X_endog, Z, clusters, partial, data
+@@ -137,6 +227,5 @@
+ 
+         if not cluster:
+-            # Generate unique cluster per observation for heteroskedastic SEs
+-            clusters = np.arange(len(y))
++            clusters = None
+ 
+         result = iv2sls_with_cluster_se(
+@@ -153,7 +242,14 @@
+     def _run_areg(self, sample_filter=None):
+         """
+-        Run OLS with country FE matching Stata's areg.
+-
+-        areg ydgdp cs_index_ret cs_index_vol i.yq_int, ab(country) cluster(country)
++        Run OLS with country and period FE matching Stata's areg EXACTLY.
++
++        Stata: areg ydgdp cs_index_ret cs_index_vol i.yq_int, ab(country) cluster(country)
++
++        CRITICAL FIX: Stata's areg uses a ONE-STEP exact solution:
++        1. Demean y and X by the absorbed group (country)
++        2. Include period dummies (i.yq_int) as EXPLICIT regressors
++        3. Run OLS on the demeaned data with period dummies
++
++        This is DIFFERENT from iterative demeaning and produces EXACT results.
+         """
+         data = self.df.copy()
+@@ -161,25 +257,40 @@
+             data = data[sample_filter].copy()
+ 
+-        vars_needed = ['ydgdp', 'cs_index_ret', 'cs_index_vol', 'country']
++        # Need yq_int for period FE
++        vars_needed = ['ydgdp', 'cs_index_ret', 'cs_index_vol', 'country', 'yq_int']
+         valid = data[vars_needed].notna().all(axis=1)
+         data = data[valid].copy()
+ 
+         y = data['ydgdp'].values.astype(np.float64)
+-        X = np.column_stack([
++        X_main = np.column_stack([
+             data['cs_index_ret'].values.astype(np.float64),
+             data['cs_index_vol'].values.astype(np.float64),
+         ])
+-        clusters = data['country'].values
+-
+-        # Demean by country (areg absorbs country FE)
+         country_groups = data['country'].values
+-        unique_countries = np.unique(country_groups)
+-
+-        for c in unique_countries:
+-            mask = country_groups == c
+-            y[mask] -= y[mask].mean()
+-            X[mask] -= X[mask].mean(axis=0)
+-
+-        result = ols_with_cluster_se(y, X, clusters)
++        period_groups = data['yq_int'].values
++
++        # Create period dummies (i.yq_int in Stata)
++        unique_periods = np.unique(period_groups)
++        n_periods = len(unique_periods)
++        # Drop first period to avoid perfect collinearity (Stata's default)
++        period_dummies = np.zeros((len(data), n_periods - 1))
++        for i, p in enumerate(unique_periods[1:]):
++            period_dummies[:, i] = (period_groups == p).astype(float)
++
++        # Combine main regressors with period dummies
++        X = np.hstack([X_main, period_dummies])
++
++        # Use areg_ols for EXACT Stata behavior
++        result = areg_ols(
++            y=y,
++            X=X,
++            absorb_groups=country_groups,
++            cluster_groups=country_groups,
++            include_constant=False,  # No constant after demeaning
++        )
++
++        # Store sample for common sample usage
++        result['sample_data'] = data
++
+         return result, data
+ 
+@@ -235,10 +346,10 @@
+     # TABLE 2: Baseline Results
+     # =========================================================================
+-    def table2_baseline(self):
++    def table2_baseline(self, save_output: bool = True):
+         """
+         TABLE 2: Baseline IV results.
+ 
+         Columns:
+-        1. OLS with country FE (areg)
++        1. OLS with country FE and period FE (areg with i.yq_int)
+         2. IV - micro+macro (cs_index_ret, cs_index_vol)
+         3. IV - stock index (l1avgret, l1lavgvol)
+@@ -252,5 +363,5 @@
+... (58 more diff lines truncated)
+```
+
+### src/iv_var/estimation.py  vs  original codes and data/iv_var_estimation.py
+
+- Similarity: `0.3928`
+- Line count (new/old): `990/611`
+- Common defs: `14`
+- New-only defs (4): `_prepare_panel_data, _run_spec, _solve_gmm, create_mt19937_rng`
+- Old-only defs (0): ``
+- Diff preview:
+```diff
+--- original codes and data/iv_var_estimation.py
++++ src/iv_var/estimation.py
+@@ -7,4 +7,9 @@
+ Original: MATLAB R2021a, ~1 min runtime, ~1.5 GB memory
+ Python: Uses scipy.optimize.minimize for GMM, numpy for IRF computation
++
++CRITICAL FIXES for exact MATLAB replication:
++1. Random number generator: MT19937AR (matching MATLAB's RandStream)
++2. Optimizer: scipy.optimize.minimize with fmincon-equivalent settings
++3. Bootstrap: Stationary block bootstrap with geometric block sizes
+ """
+ 
+@@ -15,7 +20,24 @@
+ from scipy.optimize import minimize
+ from typing import Optional
++import warnings
+ 
+ PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+ sys.path.insert(0, str(PROJECT_ROOT))
++
++
++def create_mt19937_rng(seed: int = 3991):
++    """
++    Create a random number generator matching MATLAB's MT19937AR.
++    
++    MATLAB code:
++        s = RandStream('mt19937ar','Seed',3991);
++        RandStream.setGlobalStream(s);
++    
++    Python equivalent:
++        np.random.RandomState(seed) with MT19937
++    """
++    # Use legacy RandomState for MT19937 compatibility
++    rng = np.random.RandomState(seed)
++    return rng
+ 
+ 
+@@ -57,53 +79,212 @@
+         self.lengthIRF = 50
+ 
+-    def load_data(self):
+-        """Load VARdata.csv."""
+-        print(f"Loading data from {self.data_path}")
+-        self.data = pd.read_csv(self.data_path)
+-        print(f"  Shape: {self.data.shape}")
+-        return self
+-
+-    def _build_moment_vector(self, X: np.ndarray, D: np.ndarray):
+-        """
+-        Build the empirical moment vector from data.
++    def _prepare_panel_data(
++        self,
++        raw_data: pd.DataFrame,
++        time_filter=None,
++        demean_country: bool = True,
++        demean_time: bool = True,
++    ):
++        """
++        Prepare panel data exactly following the MATLAB variants.
+ 
+         Parameters
+         ----------
+-        X : (T, NX) VAR data matrix
+-        D : (T, ND) instrument matrix
++        raw_data : full VARdata dataframe
++        time_filter : optional callable on Time column returning boolean mask
++        demean_country : whether to remove country fixed effects
++        demean_time : whether to remove time fixed effects
++        """
++        data = raw_data.copy()
++        if time_filter is not None:
++            time_values = data.iloc[:, 8].values
++            data = data[time_filter(time_values)].copy()
++
++        Growth = data.iloc[:, 0].values
++        First = data.iloc[:, 1].values
++        Second = data.iloc[:, 2].values
++        NatDis = data.iloc[:, 3].values
++        PolShock = data.iloc[:, 4].values
++        Revolution = data.iloc[:, 5].values
++        Terror = data.iloc[:, 6].values
++        Country = data.iloc[:, 7].values
++        Time = data.iloc[:, 8].values
++
++        CountryList = np.unique(Country)
++        Ncountries = len(CountryList)
++
++        X_list = []
++        Xmin1_list = []
++        D_list = []
++        CountryFlags_list = []
++        TimeFlags_list = []
++
++        for countryct in range(Ncountries):
++            country_code = CountryList[countryct]
++            countrysamp = Country == country_code
++
++            rawTimecountry = Time[countrysamp]
++            rawCountrycountry = Country[countrysamp]
++
++            rawXcountry = np.column_stack([
++                Growth[countrysamp],
++                First[countrysamp],
++                Second[countrysamp],
++            ])
++            rawDcountry = np.column_stack([
++                NatDis[countrysamp],
++                PolShock[countrysamp],
++                Revolution[countrysamp],
++                Terror[countrysamp],
++            ])
++
++            Tcountry = rawXcountry.shape[0]
++            sampleVARcountry = np.arange(self.Nlags, Tcountry)
++
++            if len(sampleVARcountry) > self.Nlags + 1:
++                # MATLAB uses var(x) for this step (sample variance, ddof=1).
++                var_first = np.var(rawXcountry[sampleVARcountry, 1], ddof=1)
++                var_second = np.var(rawXcountry[sampleVARcountry, 2], ddof=1)
++                if var_first > 0:
++                    rawXcountry[sampleVARcountry, 1] = rawXcountry[sampleVARcountry, 1] / np.sqrt(var_first)
++                if var_second > 0:
++                    rawXcountry[sampleVARcountry, 2] = rawXcountry[sampleVARcountry, 2] / np.sqrt(var_second)
++
++                X_list.append(rawXcountry[sampleVARcountry, :])
++                D_list.append(rawDcountry[sampleVARcountry, :])
++                CountryFlags_list.append(rawCountrycountry[sampleVARcountry])
++                TimeFlags_list.append(rawTimecountry[sampleVARcountry])
++
++                for lagct in range(self.Nlags):
++                    sample_lag = sampleVARcountry - (lagct + 1)
++                    if lagct == 0:
++                        Xmin1country = rawXcountry[sample_lag, :]
++                    else:
++                        Xmin1country = np.hstack([Xmin1country, rawXcountry[sample_lag, :]])
++                Xmin1_list.append(Xmin1country)
++
++        X = np.vstack(X_list)
++        Xmin1 = np.vstack(Xmin1_list)
++        D = np.vstack(D_list)
++        CountryFlags = np.concatenate(CountryFlags_list)
++        TimeFlags = np.concatenate(TimeFlags_list)
++        T = X.shape[0]
++
++        if demean_country:
++            for countryct in range(Ncountries):
++                country_code = CountryList[countryct]
++                countrysamp = CountryFlags == country_code
++                numobs = np.sum(countrysamp)
++                if numobs > 0:
++                    X[countrysamp, :] = X[countrysamp, :] - np.mean(X[countrysamp, :], axis=0)
++                    Xmin1[countrysamp, :] = Xmin1[countrysamp, :] - np.mean(Xmin1[countrysamp, :], axis=0)
++
++        if demean_time:
++            TimeList = np.unique(TimeFlags)
++            for t in TimeList:
++                timesamp = TimeFlags == t
++                numobs = np.sum(timesamp)
++                if numobs > 0:
++                    X[timesamp, :] = X[timesamp, :] - np.mean(X[timesamp, :], axis=0)
++                    Xmin1[timesamp, :] = Xmin1[timesamp, :] - np.mean(Xmin1[timesamp, :], axis=0)
++
++        # MATLAB code uses var(D,1): population variance (ddof=0).
++        D = D - np.mean(D, axis=0)
++        D_std = np.sqrt(np.var(D, axis=0, ddof=0))
++        D_std[D_std == 0] = 1
++        D = D / D_std
++        D[np.isnan(D)] = 0
++
++        self.X = X
++        self.Xmin1 = Xmin1
++        self.D = D
++        self.CountryFlags = CountryFlags
++        self.TimeFlags = TimeFlags
++        self.T = T
++        self.data = pd.DataFrame(np.hstack([X, D]))
++
++    def load_data(self):
++        """
++        Load baseline data and apply baseline preprocessing from VAR.m.
++        """
++        print(f"Loading data from {self.data_path}")
++        self.raw_data = pd.read_csv(self.data_path)
++        print(f"  Raw shape: {self.raw_data.shape}")
++        self._prepare_panel_data(
++            self.raw_data,
++            time_filter=None,
++            demean_country=True,
++            demean_time=True,
++        )
++        print(f"  Preprocessed shape: X={self.X.shape}, D={self.D.shape}, T={self.T}")
++        return self
++
++    def _build_moment_vector(self, X: np.ndarray, D: np.ndarray, Xmin1: np.ndarray = None):
++        """
++        Build the empirical moment vector from data.
++        
++        CRITICAL FIX: Match MATLAB code exactly (L152-194)
++        MATLAB uses pre-built Xmin1 matrix, not dynamically constructed lags.
++
++        Parameters
++        ----------
++        X : (T, NX) VAR data matrix (already preprocessed)
++        D : (T, ND) instrument matrix (already preprocessed)
++        Xmin1 : (T, NX*Nlags) lagged X matrix (pre-built in load_data)
+ 
+         Returns
+         -------
+         MOMvec : (Nmoms,) empirical moment vector
++        eta_hat : (T, NX) reduced-form residuals
++        A_hat : (NX*Nlags, NX) VAR coefficients
+         """
+         T = X.shape[0]
+-
+-        # Estimate VAR coefficients via OLS
+-        # X_t = A1 X_{t-1} + ... + A_p X_{t-p} + eta_t
+-        Y = X[self.Nlags:]  # (T-p, NX)
+-        n_lag_obs = T - self.Nlags
+-
+-        # Build lagged regressor matrix
+... (563 more diff lines truncated)
+```
+
+### src/lmn_var/estimation.py  vs  original codes and data/estimation.py
+
+- Similarity: `0.3062`
+- Line count (new/old): `707/406`
+- Common defs: `9`
+- New-only defs (2): `_build_companion_form, create_mt19937_rng`
+- Old-only defs (0): ``
+- Diff preview:
+```diff
+--- original codes and data/estimation.py
++++ src/lmn_var/estimation.py
+@@ -12,4 +12,9 @@
+ Original: Stata/MP 15.1 + MATLAB R2021a
+ Python: Uses linearmodels + numpy for admissible set computation
++
++CRITICAL FIXES for exact MATLAB replication:
++1. Random draws: N = 1,500,000 (matching MATLAB)
++2. Random matrix generation: QR decomposition matching MATLAB
++3. Admissibility checks: Exact disaster event restrictions
+ """
+ 
+@@ -22,4 +27,18 @@
+ PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+ sys.path.insert(0, str(PROJECT_ROOT))
++
++
++def create_mt19937_rng(seed: int = 25041):
++    """
++    Create a random number generator matching MATLAB's MT19937AR.
++    
++    MATLAB code (var_LMN.m):
++        rng(25041);
++    
++    Python equivalent:
++        np.random.RandomState(seed) with MT19937
++    """
++    rng = np.random.RandomState(seed)
++    return rng
+ 
+ 
+@@ -42,5 +61,5 @@
+         # VAR dimensions
+         self.NX = 3  # GDP growth, first moment, second moment
+-        self.Nlags = 3
++        self.Nlags = 12
+         self.lengthIRF = 50
+ 
+@@ -53,5 +72,10 @@
+         return self
+ 
+-    def step1_estimate_var_fe(self):
++    def step1_estimate_var_fe(
++        self,
++        include_country_fe: bool = True,
++        include_time_fe: bool = True,
++        nlags: Optional[int] = None,
++    ):
+         """
+         STEP 1: Estimate VAR with country and time fixed effects.
+@@ -64,16 +88,31 @@
+         """
+         print("\n--- Step 1: VAR with FE estimation ---")
+-
+-        # Variable names (matching Stata code)
+-        # Note: Data uses 'ret' and 'vol' instead of 'avgret' and 'lavgvol'
+-        var_names = ['ydgdp', 'ret', 'vol']
+-
+-        # Build lagged variables and time variable
++        if nlags is not None:
++            self.Nlags = int(nlags)
++
++        # Match Stata *_var_OLSest.do exactly:
++        # est_y = ydgdp
++        # est_first = l.ret
++        # est_second = l.log(vol)
++        var_names = ['est_y', 'est_first', 'est_second']
++
++        # Build transformed variables and lagged variables.
+         data = self.df.copy()
+         # Create yq_int (year-quarter integer for time FE)
+         data['yq_int'] = data['year'] * 4 + data['quarter']
++        data['est_y'] = data['ydgdp']
++        data['est_first'] = data.groupby('country')['ret'].shift(1)
++        data['logvol'] = np.log(np.clip(data['vol'].astype(float), 1e-12, None))
++        data['est_second'] = data.groupby('country')['logvol'].shift(1)
++
++        # Standardize est_first and est_second by sample std (Stata summ ... r(sd)).
++        for v in ['est_first', 'est_second']:
++            sd = data[v].std(ddof=1)
++            if sd and np.isfinite(sd) and sd > 0:
++                data[v] = data[v] / sd
++
+         for var in var_names:
+             for lag in range(1, self.Nlags + 1):
+-                data[f'l{lag}{var}'] = data.groupby('country')[var].shift(lag)
++                data[f'{var}_{lag}'] = data.groupby('country')[var].shift(lag)
+ 
+         # Estimate each equation separately (matching reghdfe)
+@@ -82,9 +121,9 @@
+ 
+         for eq_idx, dep_var in enumerate(var_names):
+-            # Build regressors: lags of all 3 variables
++            # Build regressors: lags of all 3 VAR variables (Stata est_y_* est_first_* est_second_*)
+             regressor_names = []
+             for lag in range(1, self.Nlags + 1):
+                 for var in var_names:
+-                    regressor_names.append(f'l{lag}{var}')
++                    regressor_names.append(f'{var}_{lag}')
+ 
+             all_cols = [dep_var] + regressor_names + ['country', 'yq_int']
+@@ -95,6 +134,10 @@
+             X = eq_data[regressor_names].values.astype(np.float64)
+ 
+-            # Iterative demeaning by country and time (Frisch-Waugh-Lovell)
+-            for fe_col in ['country', 'yq_int']:
++            fe_cols = []
++            if include_country_fe:
++                fe_cols.append('country')
++            if include_time_fe:
++                fe_cols.append('yq_int')
++            for fe_col in fe_cols:
+                 groups = eq_data[fe_col].values
+                 unique_groups = np.unique(groups)
+@@ -127,5 +170,5 @@
+         
+         # Find common valid observations across all equations
+-        all_lag_cols = [f'l{l}{v}' for l in range(1, self.Nlags + 1) for v in var_names]
++        all_lag_cols = [f'{v}_{l}' for l in range(1, self.Nlags + 1) for v in var_names]
+         common_valid = np.ones(len(data), dtype=bool)
+         for dep_var in var_names:
+@@ -147,6 +190,10 @@
+             X = eq_data[regressor_names].values.astype(np.float64)
+             
+-            # Demean by FE
+-            for fe_col in ['country', 'yq_int']:
++            fe_cols = []
++            if include_country_fe:
++                fe_cols.append('country')
++            if include_time_fe:
++                fe_cols.append('yq_int')
++            for fe_col in fe_cols:
+                 groups = eq_data[fe_col].values
+                 unique_groups = np.unique(groups)
+@@ -162,99 +209,326 @@
+         
+         resid_matrix = np.column_stack([resid_common[v] for v in var_names])
+-        self.Sigma_hat = (resid_matrix.T @ resid_matrix) / resid_matrix.shape[0]
++        self.residuals = resid_matrix  # Store for step2
++        self.Sigma_hat = np.cov(resid_matrix.T, ddof=1)  # Use ddof=1 matching MATLAB cov()
++        self.common_valid_mask = common_valid.copy()
+ 
+         print(f"  Residual covariance (diagonal): {np.diag(self.Sigma_hat)}")
+-
++        
++        # CRITICAL FIX: Load event indicators from data
++        # These are needed for admissibility criteria in step2
++        # MATLAB L34-38: pol_event=data(:,11), ter_event=data(:,12), etc.
++        # The event columns should be in the original data
++        
++        # Check if event columns exist in the data
++        event_cols = {
++            'pol_event': ['polshock', 'pol_shock', 'coup'],
++            'ter_event': ['tershock', 'ter_shock', 'terror'],
++            'nat_event': ['natshock', 'nat_shock', 'natural'],
++            'rev_event': ['revshock', 'rev_shock', 'revolution'],
++        }
++        
++        for event_name, possible_cols in event_cols.items():
++            for col in possible_cols:
++                if col in self.df.columns:
++                    # Align event indicators to the common residual sample.
++                    setattr(self, event_name, data.loc[common_valid, col].values.astype(float))
++                    break
++            else:
++                # If not found, create dummy (all zeros)
++                print(f"  Warning: {event_name} not found in data, using zeros")
++                setattr(self, event_name, np.zeros(resid_matrix.shape[0]))
++        
+         return self
+ 
+-    def step2_admissible_sets(self, n_draws: int = 100000, seed: int = 3991):
++    def step2_admissible_sets(
++        self,
++        n_draws: int = 1500000,
++        seed: int = 25041,
++        restrictions: Optional[dict] = None,
++    ):
+         """
+         STEP 2: Compute admissible sets via random matrix draws.
+ 
+-        Matches MATLAB: STEP2_MATLAB_ESTIMATION.m
+-
+-        For each draw:
+-        1. Generate random orthogonal matrix Q
+-        2. Compute structural matrix B = Sigma^{1/2} Q
+-        3. Check if impulse responses are consistent with disaster events
+-        4. If yes, store the impulse responses
++        Matches MATLAB: var_LMN.m EXACTLY
++
++        CRITICAL: The admissibility criteria in MATLAB (L169-174) are:
++        1. mean_shocks(rev_event) for shock 3 > 0.15
++        2. mean_shocks(rev_event) for shock 2 < -0.1
++        3. mean_shocks(pol_event) for shock 3 > 0.15
++        4. mean_shocks(pol_event) for shock 2 > 0.1
++        5. mean_shocks(nat_event) for shock 2 < 0.0
++        6. mean_shocks(ter_event) for shock 2 < 0.0
++
++        This is COMPLETELY DIFFERENT from checking IRF signs!
+ 
+         Parameters
+         ----------
+-        n_draws : number of random draws
+-        seed : random seed
+-        """
+-        print(f"\n--- Step 2: Admissible Sets ({n_draws} draws) ---")
+-        rng = np.random.RandomState(seed)
+-
+-        Sigma = self.Sigma_hat
++        n_draws : number of random draws (MATLAB uses 1,500,000)
++        seed : random seed (MATLAB uses 25041)
++        """
++        print(f"\n--- Step 2: Admissible Sets ({n_draws:,} draws) ---")
++        
++        # CRITICAL FIX: Use MT19937AR matching MATLAB's rng(25041)
++        rng = create_mt19937_rng(seed)
++
++        if restrictions is None:
++            # Baseline restrictions from BASELINE/var_LMN.m style.
++            restrictions = {
+... (486 more diff lines truncated)
+```
+
+### src/utils/regression.py  vs  original codes and data/regression.py
+
+- Similarity: `0.2832`
+- Line count (new/old): `751/388`
+- Common defs: `6`
+- New-only defs (4): `areg_ols, compute_kp_rk_wald_f, ols_with_classical_se, partial_out_fwl`
+- Old-only defs (0): ``
+- Diff preview:
+```diff
+--- original codes and data/regression.py
++++ src/utils/regression.py
+@@ -3,12 +3,18 @@
+ 
+ Provides helpers for:
+-- Fixed effects demeaning (matching Stata's areg/reghdfe)
+-- IV/2SLS estimation (matching Stata's ivreg2)
++- Fixed effects demeaning (matching Stata's areg/reghdfe EXACTLY)
++- IV/2SLS estimation (matching Stata's ivreg2 EXACTLY)
+ - Output formatting (matching Stata's outreg2)
++
++CRITICAL: This module is designed to produce bit-for-bit matching results
++with Stata's areg, reghdfe, and ivreg2 commands.
+ """
+ 
+ import numpy as np
+ import pandas as pd
+-from typing import Optional
++from typing import Optional, Tuple, List
++from scipy import linalg
++from scipy.stats import chi2, f as f_dist
++from linearmodels.iv import IV2SLS
+ 
+ 
+@@ -43,9 +49,15 @@
+     fe_cols: list,
+     sample_col: Optional[str] = None,
+-) -> tuple:
++    max_iter: int = 1000,
++    tol: float = 1e-12,
++) -> Tuple[pd.Series, pd.DataFrame, np.ndarray]:
+     """
+     Iteratively demean by multiple fixed effects (Frisch-Waugh-Lovell).
+ 
+     Matches Stata's reghdfe with absorb(fe1 fe2).
++
++    IMPORTANT: This uses iterative demeaning which is mathematically
++    equivalent to the projection approach but may have small numerical
++    differences due to convergence tolerance.
+ 
+     Parameters
+@@ -56,4 +68,6 @@
+     fe_cols : list of fixed effect column names
+     sample_col : optional column to filter sample
++    max_iter : maximum iterations for convergence
++    tol : convergence tolerance
+ 
+     Returns
+@@ -69,25 +83,367 @@
+     if sample_col is not None:
+         data = data[data[sample_col] == 1]
+-    sample_mask = data[all_cols].notna().all(axis=1)
++    sample_mask = data[all_cols].notna().all(axis=1).values
+     data = data[sample_mask].copy()
+ 
+-    # Iterative demeaning for multiple FE
++    # Extract arrays
+     y = data[y_col].values.copy().astype(np.float64)
+     X = data[x_cols].values.copy().astype(np.float64)
+ 
+-    for fe_col in fe_cols:
+-        groups = data[fe_col].values
+-        unique_groups = np.unique(groups)
+-
+-        for g in unique_groups:
+-            mask = groups == g
+-            n_g = mask.sum()
+-            if n_g > 0:
+-                y_mean = y[mask].mean()
+-                x_mean = X[mask].mean(axis=0)
+-                y[mask] -= y_mean
+-                X[mask] -= x_mean
++    # Iterative demeaning for multiple FE (Frisch-Waugh-Lovell)
++    for iteration in range(max_iter):
++        max_change = 0.0
++
++        for fe_col in fe_cols:
++            groups = data[fe_col].values
++            unique_groups = np.unique(groups)
++
++            for g in unique_groups:
++                mask = groups == g
++                n_g = mask.sum()
++                if n_g > 0:
++                    # Demean y
++                    y_mean = y[mask].mean()
++                    y_old = y[mask].copy()
++                    y[mask] -= y_mean
++                    max_change = max(max_change, np.max(np.abs(y[mask] - y_old)))
++
++                    # Demean X
++                    x_mean = X[mask].mean(axis=0)
++                    X_old = X[mask].copy()
++                    X[mask] -= x_mean
++                    max_change = max(max_change, np.max(np.abs(X[mask] - X_old)))
++
++        if max_change < tol:
++            break
+ 
+     return pd.Series(y, index=data.index), pd.DataFrame(X, columns=x_cols, index=data.index), sample_mask
++
++
++def areg_ols(
++    y: np.ndarray,
++    X: np.ndarray,
++    absorb_groups: np.ndarray,
++    cluster_groups: Optional[np.ndarray] = None,
++    include_constant: bool = False,
++) -> dict:
++    """
++    OLS with absorbed fixed effects - EXACTLY matching Stata's areg behavior.
++
++    Stata's areg uses a ONE-STEP exact solution:
++    1. Demean y and X by the absorbed group (e.g., country)
++    2. Run OLS on the demeaned data
++
++    This is DIFFERENT from iterative demeaning when there are additional
++    regressors (like time dummies) - those are included as explicit regressors.
++
++    Parameters
++    ----------
++    y : (N,) dependent variable
++    X : (N, K) regressors (should include time dummies if needed)
++    absorb_groups : (N,) group identifiers for absorption
++    cluster_groups : (N,) cluster identifiers for robust SEs
++    include_constant : whether to include constant in regression
++
++    Returns
++    -------
++    dict with coef, se, tstat, pval, nobs, nclusters, r2_within, residuals
++    """
++    N, K = X.shape
++
++    # Step 1: Demean by absorb_groups (EXACTLY as Stata areg does)
++    unique_absorb = np.unique(absorb_groups)
++    n_absorb = len(unique_absorb)
++
++    y_dm = y.copy()
++    X_dm = X.copy()
++
++    for g in unique_absorb:
++        mask = absorb_groups == g
++        if mask.sum() > 0:
++            y_dm[mask] -= y_dm[mask].mean()
++            X_dm[mask] -= X_dm[mask].mean(axis=0)
++
++    # Step 2: OLS on demeaned data
++    # Add constant if requested (usually NOT needed for areg since demeaning removes it)
++    if include_constant:
++        X_dm = np.hstack([np.ones((N, 1)), X_dm])
++        K += 1
++
++    # Use SVD for numerical stability
++    try:
++        beta, residuals, rank, s = np.linalg.lstsq(X_dm, y_dm, rcond=None)
++    except:
++        # Fallback to pseudo-inverse
++        XtX_inv = np.linalg.pinv(X_dm.T @ X_dm)
++        beta = XtX_inv @ (X_dm.T @ y_dm)
++        residuals = y_dm - X_dm @ beta
++
++    residuals = y_dm - X_dm @ beta
++
++    # Step 3: Compute standard errors
++    if cluster_groups is not None:
++        # Cluster-robust SEs matching Stata's cluster() option
++        unique_clusters = np.unique(cluster_groups)
++        n_clusters = len(unique_clusters)
++
++        # Meat matrix: sum over clusters of (X_g' e_g)(X_g' e_g)'
++        meat = np.zeros((K, K))
++        for c in unique_clusters:
++            mask = cluster_groups == c
++            Xc = X_dm[mask]
++            ec = residuals[mask]
++            Xu_e = Xc.T @ ec
++            meat += np.outer(Xu_e, Xu_e)
++
++        # Bread matrix
++        XtX = X_dm.T @ X_dm
++        try:
++            XtX_inv = np.linalg.inv(XtX)
++        except:
++            XtX_inv = np.linalg.pinv(XtX)
++
++        # Small sample correction: Stata uses (N-1)/(N-K) * G/(G-1)
++        # where G = number of clusters
++        # This is the standard cluster-robust correction
++        df_correction = ((N - 1) / (N - K)) * (n_clusters / (n_clusters - 1))
++
++        V = df_correction * (XtX_inv @ meat @ XtX_inv)
++        se = np.sqrt(np.diag(V))
++
++        nclusters = n_clusters
++    else:
++        # Standard OLS SEs
++        XtX = X_dm.T @ X_dm
++        try:
++            XtX_inv = np.linalg.inv(XtX)
++        except:
++            XtX_inv = np.linalg.pinv(XtX)
++
++        sigma2 = np.sum(residuals ** 2) / (N - K)
++        V = sigma2 * XtX_inv
++        se = np.sqrt(np.diag(V))
++        nclusters = 1
++
++    # Within R-squared (matching Stata areg's R-squared)
++    ss_res = np.sum(residuals ** 2)
++    ss_tot = np.sum((y_dm - y_dm.mean()) ** 2)  # Already demeaned, so mean is ~0
++    r2_within = 1 - ss_res / ss_tot if ss_tot > 0 else 0
++
++    return {
++        'coef': beta,
++        'se': se,
++        'residuals': residuals,
++        'nobs': N,
++        'nclusters': nclusters if cluster_groups is not None else 0,
++        'r2_within': r2_within,
++        'V': V,
+... (514 more diff lines truncated)
+```
+
+### run_all.py  vs  original codes and data/run_all.py
+
+- Similarity: `0.7955`
+- Line count (new/old): `80/73`
+- Common defs: `5`
+- New-only defs (0): ``
+- Old-only defs (0): ``
+- Diff preview:
+```diff
+--- original codes and data/run_all.py
++++ run_all.py
+@@ -11,4 +11,5 @@
+ 
+ import sys
++import os
+ from pathlib import Path
+ 
+@@ -34,5 +35,6 @@
+     from src.lmn_var.estimation import LMNVAR
+     lmn = LMNVAR()
+-    lmn.run_all()
++    n_draws = int(os.getenv("LMN_N_DRAWS", "1500000"))
++    lmn.run_all(n_draws=n_draws)
+ 
+ 
+@@ -40,6 +42,11 @@
+     """Run model simulation (Figure 8)."""
+     from src.model.solve import MicroMacroModel
+-    model = MicroMacroModel()
+-    model.run_all()
++    # Default to full model for paper-comparison runs.
++    simplified = os.getenv("MODEL_SIMPLIFIED", "0") in {"1", "true", "True"}
++    do_estimation = os.getenv("MODEL_DO_ESTIMATION", "0") in {"1", "true", "True"}
++    irf_t = int(os.getenv("MODEL_IRF_T", "40"))
++    irf_sims = int(os.getenv("MODEL_IRF_N_SIMS", "100"))
++    model = MicroMacroModel(simplified=simplified)
++    model.run_all(do_estimation=do_estimation, irf_T=irf_t, irf_n_sims=irf_sims)
+ 
+ 
+```
+
+### src/model/solve.py  vs  original codes and data/solve.py
+
+- Similarity: `0.1391`
+- Line count (new/old): `332/302`
+- Common defs: `4`
+- New-only defs (6): `build, compute_irf, estimate, quick_test, simulate, solve`
+- Old-only defs (6): `_adjustment_cost, _bellman_rhs, _build_grids, _firm_profit, simulate_irf, solve_value_function`
+- Diff preview:
+```diff
+--- original codes and data/solve.py
++++ src/model/solve.py
+@@ -7,9 +7,16 @@
+ The model is a heterogeneous-firm DSGE with:
+ - Firms facing time-varying uncertainty (volatility shocks)
+-- Fixed costs of adjustment
++- NON-CONVEX adjustment costs (fixed costs + linear costs)
+ - Aggregate dynamics emerging from micro-level decisions
+ 
+-Original: Fortran 90, compiled with gfortran, ~5 min runtime
+-Python: Uses numpy for grid solving, scipy for optimization
++Key Features:
++1. NON-CONVEX adjustment costs for capital and labor
++2. 5D state space: (z, a, s, k, l)
++3. Howard acceleration for VFI
++4. GMM estimation with PSO optimization
++5. IV regression for moment matching
++
++Original: Fortran 90, ~5 min runtime
++Python: Uses numpy/scipy for grid solving
+ """
+ 
+@@ -17,9 +24,28 @@
+ import numpy as np
+ from pathlib import Path
+-from scipy.optimize import minimize
+-from scipy.interpolate import interp1d
++from typing import Dict, Tuple, Optional
++import warnings
+ 
+ PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+ sys.path.insert(0, str(PROJECT_ROOT))
++
++from .params import ModelParameters, create_params
++from .grids import StateGrids, build_grids
++from .adjustment import (
++    AdjustmentCostCalculator,
++    capital_adjustment_cost,
++    labor_adjustment_cost,
++    output
++)
++from .vfi import VFISolution, solve_vfi, solve_vfi_simplified
++from .simulation import (
++    SimulationResults,
++    simulate_firms,
++    simulate_irf,
++    compute_figure8_irf
++)
++from .gmm import GMMSolution, estimate_gmm, gmm_objective
++from .iv_regression import IVResults, run_iv_regression
++from .optimizer import PSOConfig, PSOResult, pso_optimize
+ 
+ 
+@@ -27,276 +53,280 @@
+     """
+     Micro-macro model matching the Fortran implementation.
+-
+-    Key components:
+-    1. Firm value function (Bellman equation on grid)
+-    2. Aggregate law of motion for capital
+-    3. PSO or grid search for steady state
+-    4. Simulation of impulse responses
++    
++    This class provides a unified interface to:
++    1. Build state space grids
++    2. Solve firm value function (VFI)
++    3. Simulate firm dynamics
++    4. Compute IRFs
++    5. Estimate parameters via GMM
++    
++    Examples
++    --------
++    >>> model = MicroMacroModel(simplified=False)
++    >>> model.run_all()
+     """
+-
+-    def __init__(self):
++    
++    def __init__(self, simplified: bool = False):
++        """
++        Initialize the model.
++        
++        Parameters
++        ----------
++        simplified : bool
++            If True, use smaller grid sizes for faster computation.
++            Default is False to better align with Fortran baseline grids.
++        """
+         self.output_dir = PROJECT_ROOT / "output" / "figures"
+         self.output_dir.mkdir(parents=True, exist_ok=True)
+-
+-        # Model parameters (matching Fortran defaults)
+-        self.params = {
+-            'beta': 0.99,       # discount factor
+-            'delta': 0.025,     # depreciation rate
+-            'alpha': 0.33,      # capital share
+-            'rho': 0.95,        # persistence of uncertainty
+-            'sigma_base': 0.02, # base volatility
+-            'sigma_shock': 0.01, # volatility shock size
+-            'phi': 0.5,         # adjustment cost parameter
+-            'theta': 0.5,       # curvature of adjustment cost
+-            'Nk': 500,          # capital grid points
+-            'Nsigma': 20,       # volatility grid points
+-            'k_min': 0.1,
+-            'k_max': 20.0,
+-            'sigma_min': 0.01,
+-            'sigma_max': 0.10,
+-        }
+-
+-    def _build_grids(self):
+-        """Build capital and volatility grids."""
+-        p = self.params
+-        # Capital grid (exponential spacing)
+-        self.k_grid = np.exp(np.linspace(np.log(p['k_min']), np.log(p['k_max']), p['Nk']))
+-        # Volatility grid
+-        self.sigma_grid = np.linspace(p['sigma_min'], p['sigma_max'], p['Nsigma'])
+-
+-    def _firm_profit(self, k, sigma, K_agg, N_agg=1.0):
+-        """
+-        Firm profit function.
+-
+-        pi(k, sigma, K_agg) = A * k^alpha * K_agg^(alpha-1) * N_agg^(1-alpha) - delta*k
+-        where A follows log-normal with volatility sigma.
+-        """
+-        p = self.params
+-        # Expected profit (integrate over productivity shocks)
+-        # E[A] = exp(-sigma^2/2) for log-normal
+-        A_mean = np.exp(-0.5 * sigma ** 2)
+-        profit = A_mean * k ** p['alpha'] * K_agg ** (p['alpha'] - 1) * N_agg ** (1 - p['alpha'])
+-        profit -= p['delta'] * k
+-        return profit
+-
+-    def _adjustment_cost(self, k_new, k_old):
+-        """
+-        Adjustment cost function.
+-
+-        phi * (k_new - k_old)^2 / (2 * k_old)
+-        """
+-        p = self.params
+-        return p['phi'] * (k_new - k_old) ** 2 / (2 * k_old)
+-
+-    def _bellman_rhs(self, V_next, k, sigma, K_agg):
+-        """
+-        Right-hand side of Bellman equation.
+-
+-        V(k, sigma) = max_{k'} [ pi(k, sigma, K_agg) - adj_cost(k', k) + beta * E[V(k', sigma') | sigma] ]
+-        """
+-        p = self.params
+-        Nk = len(self.k_grid)
+-        Nsigma = len(self.sigma_grid)
+-
+-        # Expected continuation value: E[V(k', sigma') | sigma]
+-        # sigma' follows AR(1): log(sigma') = rho * log(sigma) + eps
+-        # We approximate by interpolating V_next over sigma grid
+-        # and taking expectation over sigma transitions
+-
+-        # For now, use simple discretization
+-        # Transition probabilities for sigma (Rouwenhorst method would be better)
+-        sigma_prime_weights = np.zeros(Nsigma)
+-        for j in range(Nsigma):
+-            sigma_j = self.sigma_grid[j]
+-            # Log-normal transition
+-            log_sigma = np.log(sigma)
+-            log_sigma_j = np.log(sigma_j)
+-            log_sigma_mean = p['rho'] * log_sigma
+-            log_sigma_var = (1 - p['rho'] ** 2) * np.log(1 + (p['sigma_base'] / sigma) ** 2)
+-            sigma_prime_weights[j] = np.exp(-0.5 * (log_sigma_j - log_sigma_mean) ** 2 / max(log_sigma_var, 1e-10))
+-        sigma_prime_weights /= sigma_prime_weights.sum()
+-
+-        # Continuation value for each k'
+-        EV = np.zeros(Nk)
+-        for j in range(Nsigma):
+-            # Interpolate V_next(k', sigma_j) on k_grid
+-            V_interp = interp1d(self.k_grid, V_next[j, :], kind='linear',
+-                                fill_value='extrapolate')
+-            EV += sigma_prime_weights[j] * V_interp(self.k_grid)
+-
+-        # Profit
+-        profit = self._firm_profit(k, sigma, K_agg)
+-
+-        # Value for each k' choice
+-        adj_cost = np.array([self._adjustment_cost(kp, k) for kp in self.k_grid])
+-        value = profit - adj_cost + p['beta'] * EV
+-
+-        return value
+-
+-    def solve_value_function(self, K_agg=1.0, max_iter=500, tol=1e-8):
+-        """
+-        Solve firm value function via value function iteration.
+-
+-        Parameters
+-        ----------
+-        K_agg : aggregate capital (for partial equilibrium)
+-        max_iter : maximum iterations
+-        tol : convergence tolerance
+-
+-        Returns
+-        -------
+-        V : (Nsigma, Nk) value function
+-        k_policy : (Nsigma, Nk) policy function
+-        """
+-        p = self.params
+-        self._build_grids()
+-
+-        Nk = p['Nk']
+-        Nsigma = p['Nsigma']
+-
+-        # Initialize value function
+-        V = np.zeros((Nsigma, Nk))
+-
+-        for iteration in range(max_iter):
+-            V_new = np.zeros_like(V)
+-            k_policy = np.zeros_like(V)
+-
+-            for i in range(Nsigma):
+-                sigma = self.sigma_grid[i]
+-                for j in range(Nk):
+-                    k = self.k_grid[j]
+-                    rhs = self._bellman_rhs(V, k, sigma, K_agg)
+-                    best_idx = np.argmax(rhs)
+... (365 more diff lines truncated)
+```
+
+## 2) Best Match for Every src/*.py
+
+| new_file | best_old_file | similarity |
+|---|---|---:|
+| src/__init__.py | original codes and data/src___init__.py | 1.0000 |
+| src/iv/__init__.py | original codes and data/iv___init__.py | 1.0000 |
+| src/iv/__main__.py | original codes and data/__main__.py | 1.0000 |
+| src/iv/panel_iv.py | original codes and data/panel_iv.py | 0.8371 |
+| src/iv_var/__init__.py | original codes and data/iv_var___init__.py | 1.0000 |
+| src/iv_var/__main__.py | original codes and data/iv_var___main__.py | 1.0000 |
+| src/iv_var/estimation.py | original codes and data/iv_var_estimation.py | 0.3928 |
+| src/lmn_var/__init__.py | original codes and data/lmn_var___init__.py | 1.0000 |
+| src/lmn_var/__main__.py | original codes and data/lmn_var___main__.py | 0.7590 |
+| src/lmn_var/estimation.py | original codes and data/estimation.py | 0.3062 |
+| src/model/__init__.py | original codes and data/__main__.py | 0.0364 |
+| src/model/__main__.py | original codes and data/model___main__.py | 0.4413 |
+| src/model/adjustment.py | original codes and data/iv_var_estimation.py | 0.0477 |
+| src/model/ge_solver.py | original codes and data/iv_var_estimation.py | 0.0445 |
+| src/model/gmm.py | original codes and data/iv_var_estimation.py | 0.0305 |
+| src/model/grids.py | original codes and data/iv_var_estimation.py | 0.0444 |
+| src/model/irf.py | original codes and data/regression.py | 0.0380 |
+| src/model/iv_regression.py | original codes and data/regression.py | 0.0547 |
+| src/model/optimizer.py | original codes and data/regression.py | 0.0357 |
+| src/model/params.py | original codes and data/solve.py | 0.0281 |
+| src/model/simulation.py | original codes and data/solve.py | 0.0376 |
+| src/model/solve.py | original codes and data/solve.py | 0.1391 |
+| src/model/vfi.py | original codes and data/solve.py | 0.0350 |
+| src/utils/__init__.py | original codes and data/utils___init__.py | 1.0000 |
+| src/utils/regression.py | original codes and data/regression.py | 0.2832 |

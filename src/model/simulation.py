@@ -42,6 +42,24 @@ def create_mt19937_rng(seed: int = 2501):
     return rng
 
 
+def draw_uniform_matrix_fortran(rng: np.random.RandomState, nrow: int, ncol: int) -> np.ndarray:
+    """
+    Draw U(0,1) matrix emulating Fortran column-major fill order.
+    """
+    flat = rng.random(nrow * ncol)
+    return flat.reshape((nrow, ncol), order="F")
+
+
+def box_muller_matrix_from_uniforms(u1: np.ndarray, u2: np.ndarray) -> np.ndarray:
+    """
+    Generate normal shocks via Box-Muller from two U(0,1) matrices.
+    """
+    u1c = np.clip(u1, 1e-12, 1.0 - 1e-12)
+    r = np.sqrt(-2.0 * np.log(u1c))
+    theta = 2.0 * np.pi * u2
+    return r * np.cos(theta)
+
+
 @dataclass
 class SimulationResults:
     """Container for complete simulation results."""
@@ -319,6 +337,8 @@ def simulate_all_firms(
     verbose: bool = True,
     a_pos_override: Optional[np.ndarray] = None,
     s_pos_override: Optional[np.ndarray] = None,
+    z_shocks_override: Optional[np.ndarray] = None,
+    norm_shocks_override: Optional[np.ndarray] = None,
     disaster_indicators: Optional[np.ndarray] = None,
 ) -> SimulationResults:
     """
@@ -404,17 +424,22 @@ def simulate_all_firms(
         # Simulate exogenous processes
         for t in range(1, T):
             # Uncertainty transition
-            if s_shocks[t] < g.pr_mat_s[s_pos[t-1], 1]:
-                s_pos[t] = 1
-            else:
-                s_pos[t] = 0
+            cdf_s = np.cumsum(g.pr_mat_s[s_pos[t - 1], :])
+            s_pos[t] = int(np.searchsorted(cdf_s, s_shocks[t]))
+            s_pos[t] = min(s_pos[t], p.snum - 1)
             
             # Productivity transition
-            trans_probs = g.pr_mat_a[a_pos[t-1], :, s_pos[t]]
+            # Fortran uses current-period uncertainty state from t-1 transition.
+            trans_probs = g.pr_mat_a[a_pos[t - 1], :, s_pos[t - 1]]
             a_pos[t] = np.searchsorted(np.cumsum(trans_probs), a_shocks[t])
             a_pos[t] = min(a_pos[t], p.anum - 1)
 
-    z_shocks = rng.random((T, p.nfirms))
+    if z_shocks_override is not None:
+        z_shocks = np.asarray(z_shocks_override, dtype=np.float64)
+        if z_shocks.shape != (T, p.nfirms):
+            raise ValueError("z_shocks_override must have shape (T, nfirms)")
+    else:
+        z_shocks = draw_uniform_matrix_fortran(rng, T, p.nfirms)
     
     # Simulate firm productivity
     simulate_firm_exog(
@@ -459,7 +484,14 @@ def simulate_all_firms(
     )
     
     # Add noise to returns - CRITICAL FIX: use rng
-    norm_shocks = rng.randn(T, p.nfirmspub)
+    if norm_shocks_override is not None:
+        norm_shocks = np.asarray(norm_shocks_override, dtype=np.float64)
+        if norm_shocks.shape != (T, p.nfirmspub):
+            raise ValueError("norm_shocks_override must have shape (T, nfirmspub)")
+    else:
+        u1 = draw_uniform_matrix_fortran(rng, T, p.nfirmspub)
+        u2 = draw_uniform_matrix_fortran(rng, T, p.nfirmspub)
+        norm_shocks = box_muller_matrix_from_uniforms(u1, u2)
     # Fortran uses population moments over t=2..numper-1 (1-based),
     # i.e. idx 1..T-2 (0-based), with divisor ct (not ct-1).
     return_slice = returnfirm[1:T-1, :]
@@ -482,9 +514,9 @@ def simulate_all_firms(
         returnfirmsd_noise[t, :] = np.sqrt(var)
     
     # =====================
-    # Compute Aggregates
+    # Compute Aggregates (Fortran distribution-based accounting)
     # =====================
-    Y_sim = np.sum(yfirm, axis=1)
+    Y_sim = np.zeros(T)
     K_sim = np.zeros(T)
     L_sim = np.zeros(T)
     I_sim = np.zeros(T)
@@ -493,24 +525,85 @@ def simulate_all_firms(
     ACl_sim = np.zeros(T)
     C_sim = np.zeros(T)
     p_sim = np.full(T, price)
-    
-    for t in range(T):
-        K_sim[t] = np.mean(g.k_grid[endog_firm_pos[t, :] // p.lnum])
-        L_sim[t] = np.mean(g.l_grid[endog_firm_pos[t, :] % p.lnum])
-    
-    # Investment and adjustment costs
-    for t in range(1, T):
-        I_sim[t] = K_sim[t] - (1 - p.deltak) * K_sim[t-1]
-        H_sim[t] = L_sim[t] - (1 - p.deltan) * L_sim[t-1]
-        
-        ACk_sim[t] = capital_adjustment_cost(
-            K_sim[t], K_sim[t-1], p.capirrev, p.capfix, p.deltak
-        )
-        ACl_sim[t] = labor_adjustment_cost(
-            L_sim[t], L_sim[t-1], w, p.hirelin, p.firelin, p.labfix, p.deltan
-        )
-        
-        C_sim[t] = Y_sim[t] - I_sim[t] - ACk_sim[t] - ACl_sim[t]
+    K_sim[0] = (p.kbarmin + p.kbarmax) / 2.0
+
+    # Fortran main simulation loop is t=1..numper-1 (1-based).
+    # Here: t=0..T-2 (0-based); last period remains default zeros.
+    for t in range(T - 1):
+        act = int(a_pos[t])
+        sct = int(s_pos[t])
+        smin1ct = int(s_pos[t - 1]) if t > 0 else 0
+
+        dist_t = dist_zkl[:, :, t]
+        if t + 1 < T:
+            dist_zkl[:, :, t + 1] = 0.0
+
+        Y_val = 0.0
+        I_val = 0.0
+        ACk_val = 0.0
+        ACl_val = 0.0
+        Kprime_val = 0.0
+        H_val = 0.0
+        L_val = 0.0
+
+        for zct in range(p.znum):
+            for endogct in range(g.numendog):
+                weight = dist_t[zct, endogct]
+                if weight <= p.disttol:
+                    continue
+
+                exog_idx = (
+                    zct * p.anum * p.snum * p.snum
+                    + act * p.snum * p.snum
+                    + sct * p.snum
+                    + smin1ct
+                )
+                exog_idx = min(exog_idx, vfi_sol.polmat.shape[1] - 1)
+                polstar = int(vfi_sol.polmat[endogct, exog_idx, 0])
+
+                kct = int(g.endog_pos[endogct, 0])
+                lmin1ct = int(g.endog_pos[endogct, 1])
+                kprimect = int(g.endog_pos[polstar, 0])
+                lct = int(g.endog_pos[polstar, 1])
+
+                k = g.k_grid[kct]
+                l = g.l_grid[lct]
+                l_prev = g.l_grid[lmin1ct]
+                k_prime = g.k_grid[kprimect]
+                y_val = Ymat[zct, act, kct, lct]
+                i_val = k_prime - (1.0 - p.deltak) * k
+                ack_val = capital_adjustment_cost(k_prime, k, p.capirrev, p.capfix, p.deltak)
+                acl_val = labor_adjustment_cost(
+                    l, l_prev, w, p.hirelin, p.firelin, p.labfix, p.deltan
+                )
+
+                Y_val += weight * y_val
+                I_val += weight * i_val
+                ACk_val += weight * ack_val
+                ACl_val += weight * acl_val
+                Kprime_val += weight * k_prime
+                H_val += weight * (l - (1.0 - p.deltan) * l_prev)
+                L_val += weight * l
+
+                if t + 1 < T:
+                    for zprime in range(p.znum):
+                        dist_zkl[zprime, polstar, t + 1] += g.pr_mat_z[zct, zprime, sct] * weight
+
+        if t + 1 < T:
+            denom = dist_zkl[:, :, t + 1].sum()
+            if denom > 0:
+                dist_zkl[:, :, t + 1] /= denom
+            else:
+                dist_zkl[:, :, t + 1] = dist_t
+
+        Y_sim[t] = Y_val
+        I_sim[t] = I_val
+        ACk_sim[t] = ACk_val
+        ACl_sim[t] = ACl_val
+        K_sim[t + 1] = Kprime_val
+        H_sim[t] = H_val
+        L_sim[t] = L_val
+        C_sim[t] = Y_val - I_val - ACk_val - ACl_val
     
     if verbose:
         print(f"Simulation complete. GDP mean: {Y_sim.mean():.4f}")
@@ -568,72 +661,85 @@ def simulate_irf(
     # CRITICAL FIX: Use MT19937 matching Fortran
     rng = create_mt19937_rng(seed)
     
-    # Storage for IRFs
+    # Storage for IRFs.
     irf_Y = np.zeros((T_irf, n_sims))
     irf_I = np.zeros((T_irf, n_sims))
-    
+
+    # Fortran controls are 1-based; convert to 0-based.
+    shock_period = max(1, int(p.shockperIRF) - 1)  # 0-based
+    window_start = max(1, int(p.numdiscIRF) - 1)
+    # Ensure enough history + requested horizon.
+    T_full = max(int(p.lengthIRF), window_start + T_irf + 1)
+
     for sim in range(n_sims):
-        # Run simulation with shock
-        T = T_irf + 10  # Some burn-in
-        shock_period = 5
-        
-        # Initialize
-        a_pos = np.zeros(T, dtype=int)
-        s_pos = np.zeros(T, dtype=int)
-        
-        a_pos[0] = p.anum // 2
-        s_pos[0] = 0
-        
-        # Aggregate variables
-        Y_sim = np.zeros(T)
-        I_sim = np.zeros(T)
-        
-        k_idx = p.knum // 2
-        l_idx = p.lnum // 2
-        
-        for t in range(T):
-            # Uncertainty shock
-            if shock_period <= t < shock_period + int(5 * shock_size):
-                s_pos[t] = 1
-            elif t >= shock_period + int(5 * shock_size):
-                # CRITICAL FIX: use rng instead of np.random
-                if rng.random() < p.uncpers:
-                    s_pos[t] = 1
+        # Common random numbers across baseline and shocked paths.
+        u_s = rng.random(T_full)
+        u_a = rng.random(T_full)
+
+        def _build_paths(force_shock: bool):
+            a_path = np.zeros(T_full, dtype=int)
+            s_path = np.zeros(T_full, dtype=int)
+            a_path[0] = max(0, min(p.ainit - 1, p.anum - 1))
+            s_path[0] = max(0, min(p.sinit - 1, p.snum - 1))
+            for t in range(1, T_full):
+                if force_shock and shock_size > 0:
+                    # Match Fortran uncexogsimIRF:
+                    # singleshock=1: one high-unc period at shockperIRF
+                    # singleshock=0: low-unc block then one high-unc period.
+                    if int(getattr(p, "singleshock", 1)) == 1:
+                        if t == shock_period:
+                            s_path[t] = 1
+                        else:
+                            cdf_s = np.cumsum(g.pr_mat_s[s_path[t - 1], :])
+                            s_path[t] = int(np.searchsorted(cdf_s, u_s[t]))
+                            s_path[t] = min(s_path[t], p.snum - 1)
+                    else:
+                        low_start = shock_period
+                        low_end = shock_period + int(p.shocklengthIRF)
+                        high_once = low_end + 1
+                        if low_start <= t <= low_end:
+                            s_path[t] = 0
+                        elif t == high_once:
+                            s_path[t] = 1
+                        else:
+                            cdf_s = np.cumsum(g.pr_mat_s[s_path[t - 1], :])
+                            s_path[t] = int(np.searchsorted(cdf_s, u_s[t]))
+                            s_path[t] = min(s_path[t], p.snum - 1)
                 else:
-                    s_pos[t] = 0
-            
-            # Get grid values
-            k = g.k_grid[k_idx]
-            l = g.l_grid[l_idx]
-            a = g.a_grid[a_pos[t]]
-            
-            # Output
-            Y_sim[t] = output(1.0, a, k, l, p.alpha, p.nu)
-            
-            # Policy lookup
-            endog_idx = k_idx * p.lnum + l_idx
-            exog_idx = a_pos[t] * p.snum * p.snum + s_pos[t] * p.snum + s_pos[t]
-            
-            pol_idx = vfi_sol.polmat[endog_idx % g.numendog, exog_idx % g.numexog, 0]
-            k_idx_next = g.endog_pos[pol_idx % g.numendog, 0]
-            l_idx_next = g.endog_pos[pol_idx % g.numendog, 1]
-            
-            k_next = g.k_grid[k_idx_next]
-            I_sim[t] = k_next - (1 - p.deltak) * k
-            
-            k_idx = k_idx_next
-            l_idx = l_idx_next
-            
-            # Productivity transition
-            if t < T - 1:
-                trans_probs = g.pr_mat_a[a_pos[t], :, s_pos[t]]
-                # CRITICAL FIX: use rng instead of np.random
-                a_pos[t+1] = np.searchsorted(np.cumsum(trans_probs), rng.random())
-                a_pos[t+1] = min(a_pos[t+1], p.anum - 1)
-        
-        # Store IRF (relative to first period)
-        irf_Y[:, sim] = (Y_sim[:T_irf] / Y_sim[0] - 1) * 100
-        irf_I[:, sim] = (I_sim[:T_irf] / max(abs(I_sim[0]), 1e-10) - 1) * 100
+                    cdf_s = np.cumsum(g.pr_mat_s[s_path[t - 1], :])
+                    s_path[t] = int(np.searchsorted(cdf_s, u_s[t]))
+                    s_path[t] = min(s_path[t], p.snum - 1)
+
+                cdf_a = np.cumsum(g.pr_mat_a[a_path[t - 1], :, s_path[t - 1]])
+                a_path[t] = int(np.searchsorted(cdf_a, u_a[t]))
+                a_path[t] = min(a_path[t], p.anum - 1)
+            return a_path, s_path
+
+        a_base, s_base = _build_paths(force_shock=False)
+        a_shock, s_shock = _build_paths(force_shock=True)
+
+        # Same seed keeps firm-level Monte Carlo noise aligned across paths.
+        sim_seed = seed + sim
+        base = simulate_all_firms(
+            p, g, vfi_sol, T=T_full, seed=sim_seed, verbose=False,
+            a_pos_override=a_base, s_pos_override=s_base
+        )
+        shock = simulate_all_firms(
+            p, g, vfi_sol, T=T_full, seed=sim_seed, verbose=False,
+            a_pos_override=a_shock, s_pos_override=s_shock
+        )
+
+        # Figure 8 convention: percent deviation from baseline path.
+        post = slice(window_start, window_start + T_irf)
+        y_base = np.maximum(base.Y_sim[post], 1e-12)
+        i_base_raw = base.I_sim[post]
+        i_base = np.where(
+            np.abs(i_base_raw) > 1e-8,
+            i_base_raw,
+            np.where(i_base_raw >= 0.0, 1e-8, -1e-8),
+        )
+        irf_Y[:, sim] = (shock.Y_sim[post] / y_base - 1.0) * 100.0
+        irf_I[:, sim] = (shock.I_sim[post] / i_base - 1.0) * 100.0
     
     # Average across simulations
     return IRFResults(

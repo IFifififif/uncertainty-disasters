@@ -41,12 +41,14 @@ def run_lmn_var():
 def run_model():
     """Run model simulation (Figure 8)."""
     from src.model.solve import MicroMacroModel
-    simplified = os.getenv("MODEL_SIMPLIFIED", "1") not in {"0", "false", "False"}
-    do_estimation = os.getenv("MODEL_DO_ESTIMATION", "0") in {"1", "true", "True"}
-    irf_t = int(os.getenv("MODEL_IRF_T", "40"))
-    irf_sims = int(os.getenv("MODEL_IRF_N_SIMS", "100"))
-    model = MicroMacroModel(simplified=simplified)
-    model.run_all(do_estimation=do_estimation, irf_T=irf_t, irf_n_sims=irf_sims)
+    from src.model.runtime import load_model_runtime_config_from_env
+    cfg = load_model_runtime_config_from_env()
+    model = MicroMacroModel(simplified=cfg.simplified)
+    model.run_all(
+        do_estimation=cfg.do_estimation,
+        irf_T=cfg.irf_t,
+        irf_n_sims=cfg.irf_n_sims,
+    )
 
 
 def main():

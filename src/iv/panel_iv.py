@@ -345,7 +345,7 @@ class PanelIV:
     # =========================================================================
     # TABLE 2: Baseline Results
     # =========================================================================
-    def table2_baseline(self):
+    def table2_baseline(self, save_output: bool = True):
         """
         TABLE 2: Baseline IV results.
 
@@ -461,7 +461,8 @@ class PanelIV:
         ))
 
         # Save combined results
-        self._save_table_results(results, 'table2_baseline')
+        if save_output:
+            self._save_table_results(results, 'table2_baseline')
         return results
 
     # =========================================================================

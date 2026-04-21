@@ -238,22 +238,6 @@ class LMNVAR:
                 print(f"  Warning: {event_name} not found in data, using zeros")
                 setattr(self, event_name, np.zeros(resid_matrix.shape[0]))
         
-        # Also try to load from VARout.csv if it exists
-        varout_path = self.data_path.parent / 'VARout.csv'
-        if varout_path.exists():
-            try:
-                varout = pd.read_csv(varout_path, header=None)
-                # MATLAB: pol_event=data(:,11), ter_event=data(:,12), nat_event=data(:,13), rev_event=data(:,14)
-                # Python is 0-indexed, so columns 10, 11, 12, 13
-                if varout.shape[1] >= 14 and varout.shape[0] == len(data):
-                    self.pol_event = varout.iloc[:, 10].values[common_valid]
-                    self.ter_event = varout.iloc[:, 11].values[common_valid]
-                    self.nat_event = varout.iloc[:, 12].values[common_valid]
-                    self.rev_event = varout.iloc[:, 13].values[common_valid]
-                    print(f"  Loaded event indicators from VARout.csv")
-            except Exception as e:
-                print(f"  Warning: Could not load VARout.csv: {e}")
-
         return self
 
     def step2_admissible_sets(
@@ -299,7 +283,7 @@ class LMNVAR:
             }
 
         # Get residuals and event indicators
-        resids = self.residuals  # (T, NX) - should be loaded from Stata output
+        resids = self.residuals  # (T, NX) from in-memory FE-VAR estimation
         pol_event = self.pol_event  # coup indicator
         ter_event = self.ter_event  # terror indicator
         nat_event = self.nat_event  # natural disaster indicator

@@ -62,11 +62,11 @@ class MicroMacroModel:
     
     Examples
     --------
-    >>> model = MicroMacroModel(simplified=True)
+    >>> model = MicroMacroModel(simplified=False)
     >>> model.run_all()
     """
     
-    def __init__(self, simplified: bool = True):
+    def __init__(self, simplified: bool = False):
         """
         Initialize the model.
         
@@ -74,6 +74,7 @@ class MicroMacroModel:
         ----------
         simplified : bool
             If True, use smaller grid sizes for faster computation.
+            Default is False to better align with Fortran baseline grids.
         """
         self.output_dir = PROJECT_ROOT / "output" / "figures"
         self.output_dir.mkdir(parents=True, exist_ok=True)
@@ -121,13 +122,22 @@ class MicroMacroModel:
         
         print("\n--- Solving Value Function ---")
         
-        # Use simplified VFI for speed
-        self.vfi_solution = solve_vfi_simplified(
-            self.params, self.grids,
-            max_iter=max_iter or self.params.vfmaxit,
-            tol=tol or self.params.vferrortol,
-            verbose=verbose
-        )
+        # Match original structure: full mode uses full VFI routine; simplified
+        # mode keeps the lightweight solver for speed during smoke checks.
+        if self.simplified:
+            self.vfi_solution = solve_vfi_simplified(
+                self.params, self.grids,
+                max_iter=max_iter or self.params.vfmaxit,
+                tol=tol or self.params.vferrortol,
+                verbose=verbose
+            )
+        else:
+            self.vfi_solution = solve_vfi(
+                self.params, self.grids,
+                max_iter=max_iter or self.params.vfmaxit,
+                tol=tol or self.params.vferrortol,
+                verbose=verbose
+            )
         
         print(f"  Converged: {self.vfi_solution.converged}")
         print(f"  Iterations: {self.vfi_solution.iterations}")
@@ -327,5 +337,5 @@ def quick_test():
 
 
 if __name__ == '__main__':
-    model = MicroMacroModel(simplified=True)
+    model = MicroMacroModel(simplified=False)
     model.run_all()
