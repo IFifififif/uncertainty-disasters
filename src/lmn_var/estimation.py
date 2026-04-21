@@ -372,28 +372,14 @@ class LMNVAR:
         IRF_admit_ub = np.full((NX, NX, Tirf), -np.inf)
         
         admissible_irfs = []
+        admissible_rand_irfs = []
         B_admissible = []
         admit_ind = []
         g2_admit = []
-        impact_admit = []
         Nadmit = 0
-        maxg_value = -np.inf
+        maxg_value = np.nan
         maxg_index = -1
-        IRF_maxg = None
-
-        # MATLAB baseline code hard-codes:
-        # maxg_ind = 1413217; % this is the maximum value of g2_val_store(admit_ind)
-        # Preserve this behavior for baseline restrictions when enough draws are used.
-        is_baseline_restrictions = (
-            restrictions.get('rev3_min', None) == 0.15 and
-            restrictions.get('rev2_max', None) == -0.10 and
-            restrictions.get('coup3_min', None) == 0.15 and
-            restrictions.get('coup2_min', None) == 0.10 and
-            restrictions.get('nat2_max', None) == 0.0 and
-            restrictions.get('ter2_max', None) == 0.0
-        )
-        matlab_maxg_zero_based = 1413217 - 1
-        use_fixed_maxg_index = is_baseline_restrictions and (n_draws > matlab_maxg_zero_based)
+        IRF_maxg = np.zeros((NX, NX, Tirf))
         
         for randct in range(n_draws):
             pass_cond = True
@@ -430,21 +416,8 @@ class LMNVAR:
                 # Transpose to match expected shape (Tirf, NX, NX)
                 IRF = np.transpose(rand_IRF, (2, 0, 1))
                 admissible_irfs.append(IRF)
+                admissible_rand_irfs.append(rand_IRF.copy())
                 g2_admit.append(float(g2_val_store[randct]))
-                impact_admit.append(float(rand_IRF[0, 2, 0]))
-
-                # MATLAB baseline uses a fixed index for max-G (see BASELINE/var_LMN.m).
-                # For other specs (or when fixed index unavailable), fall back to argmax g2.
-                if use_fixed_maxg_index:
-                    if randct == matlab_maxg_zero_based:
-                        maxg_value = g2_val_store[randct]
-                        maxg_index = randct
-                        IRF_maxg = rand_IRF.copy()  # (NX, NX, Tirf), matching MATLAB
-                else:
-                    if g2_val_store[randct] > maxg_value:
-                        maxg_value = g2_val_store[randct]
-                        maxg_index = randct
-                        IRF_maxg = rand_IRF.copy()  # (NX, NX, Tirf), matching MATLAB
                 
                 # Update bounds (MATLAB L200-209)
                 for varct in range(NX):
@@ -471,30 +444,17 @@ class LMNVAR:
             self.IRF_med = np.median(np.transpose(admissible_arr, (2, 3, 1, 0)), axis=3)
             gdp_path = admissible_arr[:, :, 0, 2]
             self.impact_hist = gdp_path[:, 0]
-
-            # If MATLAB fixed index is requested but not admissible in this
-            # implementation's RNG/QR path, recover a max-G analogue by taking
-            # the admissible draw with largest g2 among economically consistent
-            # negative-impact responses.
-            if use_fixed_maxg_index and IRF_maxg is None:
-                g2_admit_arr = np.asarray(g2_admit, dtype=np.float64)
-                impact_admit_arr = np.asarray(impact_admit, dtype=np.float64)
-                neg_mask = impact_admit_arr < 0
-                if np.any(neg_mask):
-                    rel_idx = int(np.argmax(np.where(neg_mask, g2_admit_arr, -np.inf)))
-                else:
-                    rel_idx = int(np.argmax(g2_admit_arr))
-                self.IRF_maxg = np.transpose(admissible_arr[rel_idx], (1, 2, 0))
-                self.maxg_value = float(g2_admit_arr[rel_idx])
-                self.maxg_index = int(admit_ind[rel_idx])
-            else:
-                self.IRF_maxg = IRF_maxg
-                self.maxg_value = maxg_value
-                self.maxg_index = maxg_index
+            # Paper definition: "max G" is the admissible draw with the
+            # largest g2 criterion value.
+            g2_admit_arr = np.asarray(g2_admit, dtype=np.float64)
+            rel_idx = int(np.argmax(g2_admit_arr))
+            self.IRF_maxg = admissible_rand_irfs[rel_idx]
+            self.maxg_value = float(g2_admit_arr[rel_idx])
+            self.maxg_index = int(admit_ind[rel_idx])
         else:
             self.IRF_med = None
             self.impact_hist = np.array([])
-            self.IRF_maxg = None
+            self.IRF_maxg = np.zeros((NX, NX, Tirf))
             self.maxg_value = np.nan
             self.maxg_index = -1
 
