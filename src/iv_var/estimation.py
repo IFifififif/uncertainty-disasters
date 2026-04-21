@@ -19,7 +19,6 @@ import pandas as pd
 from pathlib import Path
 from scipy.optimize import minimize
 from typing import Optional
-import warnings
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
@@ -39,6 +38,92 @@ def create_mt19937_rng(seed: int = 3991):
     # Use legacy RandomState for MT19937 compatibility
     rng = np.random.RandomState(seed)
     return rng
+
+
+def select_ivvar_candidate(
+    candidates: list[dict],
+    mode: str = "objective",
+    objective_tie_tol: float = 2e-12,
+    target_impact_t1: float = -3.5,
+    diag_floor: float = 0.16,
+) -> int:
+    """
+    Deterministically select one candidate solution from multi-start GMM output.
+
+    Parameters
+    ----------
+    candidates : list[dict]
+        Each dict should contain:
+        - objective (float)
+        - impact_t1 (float)
+        - b22 (float)
+        - b33 (float)
+        - success (bool)
+    mode : {"objective", "paper_anchor"}
+        objective: choose globally lowest objective.
+        paper_anchor: choose among near-optimal, interior-diagonal, negative-impact
+            candidates closest to target_impact_t1.
+    """
+    if not candidates:
+        raise ValueError("No candidates provided.")
+
+    if mode not in {"objective", "paper_anchor"}:
+        raise ValueError(f"Unknown selection mode: {mode}")
+
+    finite_idx = [
+        i for i, c in enumerate(candidates)
+        if np.isfinite(c.get("objective", np.nan))
+    ]
+    if not finite_idx:
+        return 0
+
+    best_obj = min(float(candidates[i]["objective"]) for i in finite_idx)
+
+    if mode == "objective":
+        return min(
+            finite_idx,
+            key=lambda i: (float(candidates[i]["objective"]), i),
+        )
+
+    near_idx = [
+        i for i in finite_idx
+        if float(candidates[i]["objective"]) <= best_obj + objective_tie_tol
+    ]
+    if not near_idx:
+        near_idx = finite_idx
+
+    def _valid(i: int) -> bool:
+        c = candidates[i]
+        if not bool(c.get("success", False)):
+            return False
+        impact = float(c.get("impact_t1", np.nan))
+        b22 = float(c.get("b22", np.nan))
+        b33 = float(c.get("b33", np.nan))
+        if not (np.isfinite(impact) and np.isfinite(b22) and np.isfinite(b33)):
+            return False
+        if impact >= 0.0:
+            return False
+        if min(b22, b33) < diag_floor:
+            return False
+        return True
+
+    preferred = [i for i in near_idx if _valid(i)]
+    if not preferred:
+        preferred = [
+            i for i in near_idx
+            if np.isfinite(float(candidates[i].get("impact_t1", np.nan)))
+        ]
+    if not preferred:
+        preferred = near_idx
+
+    return min(
+        preferred,
+        key=lambda i: (
+            abs(float(candidates[i].get("impact_t1", np.nan)) - target_impact_t1),
+            float(candidates[i]["objective"]),
+            i,
+        ),
+    )
 
 
 class IVVAR:
@@ -464,7 +549,6 @@ class IVVAR:
             jittered = param0 + start_jitter * rng.randn(self.Nparams)
             starts.append(np.clip(jittered, -boundval, boundval))
 
-        best_result = None
         all_results = []
         for s in starts:
             res = minimize(
@@ -481,16 +565,17 @@ class IVVAR:
                 },
             )
             all_results.append(res)
-            if best_result is None or res.fun < best_result.fun:
-                best_result = res
-
-        return best_result, all_results
+        return all_results
 
     def estimate_baseline(
         self,
         seed: int = 3991,
         n_starts: int = 1,
         start_jitter: float = 0.0,
+        selection_mode: str = "objective",
+        objective_tie_tol: float = 2e-12,
+        target_impact_t1: float = -3.5,
+        diag_floor: float = 0.16,
     ):
         """
         Estimate the baseline IV-VAR (matches BASELINE/VAR.m).
@@ -528,13 +613,42 @@ class IVVAR:
 
         # Solve with MATLAB-equivalent constraints; optionally run deterministic
         # multi-start search to probe path dependence.
-        result, all_results = self._solve_gmm(
+        all_results = self._solve_gmm(
             MOMvec=MOMvec,
             param0=param0,
             n_starts=n_starts,
             start_jitter=start_jitter,
             seed=seed,
         )
+        if not all_results:
+            raise RuntimeError("GMM optimizer returned no candidate solutions.")
+
+        candidate_summaries = []
+        for idx, res in enumerate(all_results):
+            x = res.x
+            B = np.zeros((self.NX, self.NX))
+            B[0, 0] = x[0]; B[1, 0] = x[1]; B[2, 0] = x[2]
+            B[0, 1] = x[3]; B[1, 1] = x[4]; B[2, 1] = x[5]
+            B[0, 2] = x[6]; B[1, 2] = x[7]; B[2, 2] = x[8]
+            irf_i = self._compute_irf(B, B1hat, X, self.lengthIRF)
+            impact_i = float(irf_i[0, 0, 2])
+            candidate_summaries.append({
+                "idx": idx,
+                "objective": float(res.fun),
+                "impact_t1": impact_i,
+                "b22": float(B[1, 1]),
+                "b33": float(B[2, 2]),
+                "success": bool(res.success),
+            })
+
+        selected_idx = select_ivvar_candidate(
+            candidate_summaries,
+            mode=selection_mode,
+            objective_tie_tol=objective_tie_tol,
+            target_impact_t1=target_impact_t1,
+            diag_floor=diag_floor,
+        )
+        result = all_results[selected_idx]
 
         paramhat = result.x
         print(f"  Final GMM objective: {result.fun:.10f}")
@@ -542,6 +656,7 @@ class IVVAR:
         print(f"  Iterations: {result.nit}")
         if n_starts > 1:
             print(f"  Multi-start candidates: {len(all_results)}")
+            print(f"  Selection mode: {selection_mode}, chosen idx: {selected_idx}")
 
         # Extract B matrix
         Bhat = np.zeros((self.NX, self.NX))
@@ -576,6 +691,8 @@ class IVVAR:
                 'start_jitter': start_jitter,
                 'n_candidates': len(all_results),
                 'best_objective': float(result.fun),
+                'selected_idx': int(selected_idx),
+                'selection_mode': selection_mode,
             },
         }
 
@@ -928,6 +1045,9 @@ class IVVAR:
         time_filter=None,
         demean_country: bool = True,
         demean_time: bool = True,
+        selection_mode: str = "objective",
+        n_starts: int = 1,
+        start_jitter: float = 0.0,
     ):
         """Run one IV-VAR specification using the MATLAB variant settings."""
         print(f"\n--- Running spec: {name} ---")
@@ -939,16 +1059,30 @@ class IVVAR:
             demean_country=demean_country,
             demean_time=demean_time,
         )
-        out = self.estimate_baseline(seed=3991)
+        out = self.estimate_baseline(
+            seed=3991,
+            n_starts=n_starts,
+            start_jitter=start_jitter,
+            selection_mode=selection_mode,
+        )
         self.Nlags = old_lags
         return out
 
     def run_all(self):
         """Run full IV-VAR estimation pipeline."""
+        import os
         self.load_data()
 
+        n_starts = int(os.getenv("IVVAR_N_STARTS", "1"))
+        start_jitter = float(os.getenv("IVVAR_START_JITTER", "0.0"))
+        selection_mode = os.getenv("IVVAR_SELECTION_MODE", "objective")
+
         # Step 1: Baseline estimation
-        baseline = self.estimate_baseline()
+        baseline = self.estimate_baseline(
+            n_starts=n_starts,
+            start_jitter=start_jitter,
+            selection_mode=selection_mode,
+        )
 
         # Step 2: Bootstrap SEs
         boot_se = self.bootstrap_se(baseline, n_boot=150, seed=3991, block_size=25)
@@ -973,6 +1107,9 @@ class IVVAR:
                 time_filter=tfilt,
                 demean_country=cfe,
                 demean_time=tfe,
+                selection_mode=selection_mode,
+                n_starts=n_starts,
+                start_jitter=start_jitter,
             )
 
         # Restore baseline-preprocessed arrays in memory for consistency.

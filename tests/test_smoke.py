@@ -57,6 +57,36 @@ def test_iv_var_module():
     print("  [PASS] IV-VAR module loads and instantiates")
 
 
+def test_iv_var_candidate_selector_objective():
+    """Objective mode should pick globally smallest objective."""
+    from src.iv_var.estimation import select_ivvar_candidate
+    cands = [
+        {"objective": 3.30e-5, "impact_t1": -2.0, "b22": 0.20, "b33": 0.18, "success": True},
+        {"objective": 3.20e-5, "impact_t1": -5.0, "b22": 0.24, "b33": 0.14, "success": True},
+        {"objective": 3.25e-5, "impact_t1": -3.2, "b22": 0.22, "b33": 0.17, "success": True},
+    ]
+    idx = select_ivvar_candidate(cands, mode="objective")
+    assert idx == 1
+
+
+def test_iv_var_candidate_selector_paper_anchor():
+    """paper_anchor should prefer near-optimal interior negative-impact candidate near -3.5."""
+    from src.iv_var.estimation import select_ivvar_candidate
+    cands = [
+        {"objective": 3.26923808e-5, "impact_t1": -1.95, "b22": 0.201, "b33": 0.200, "success": True},
+        {"objective": 3.26923809e-5, "impact_t1": -3.52, "b22": 0.236, "b33": 0.164, "success": True},
+        {"objective": 3.26923810e-5, "impact_t1": 1.60, "b22": 0.0001, "b33": 0.173, "success": True},
+    ]
+    idx = select_ivvar_candidate(
+        cands,
+        mode="paper_anchor",
+        objective_tie_tol=2e-12,
+        target_impact_t1=-3.5,
+        diag_floor=0.16,
+    )
+    assert idx == 1
+
+
 def test_lmn_var_module():
     """Test LMN VAR module instantiation."""
     from src.lmn_var.estimation import LMNVAR
@@ -106,6 +136,8 @@ if __name__ == '__main__':
     test_utils()
     test_iv_module()
     test_iv_var_module()
+    test_iv_var_candidate_selector_objective()
+    test_iv_var_candidate_selector_paper_anchor()
     test_lmn_var_module()
     test_model_module()
 

@@ -17,6 +17,7 @@ import argparse
 import json
 import time
 from pathlib import Path
+import os
 import sys
 
 import numpy as np
@@ -62,9 +63,17 @@ def run_iv() -> dict:
 
 def run_iv_var() -> dict:
     t0 = time.time()
+    n_starts = int(os.getenv("IVVAR_N_STARTS", "120"))
+    start_jitter = float(os.getenv("IVVAR_START_JITTER", "0.2"))
+    selection_mode = os.getenv("IVVAR_SELECTION_MODE", "paper_anchor")
     ivv = IVVAR()
     ivv.load_data()
-    baseline = ivv.estimate_baseline(seed=3991)
+    baseline = ivv.estimate_baseline(
+        seed=3991,
+        n_starts=n_starts,
+        start_jitter=start_jitter,
+        selection_mode=selection_mode,
+    )
     # Small bootstrap for quick check speed; full replication still uses 150.
     se = ivv.bootstrap_se(baseline, n_boot=30, seed=3991, block_size=25)
     return {
