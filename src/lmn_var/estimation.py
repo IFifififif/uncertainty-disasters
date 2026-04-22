@@ -51,11 +51,13 @@ class LMNVAR:
     Step 3: Generate figures from admissible sets (MATLAB)
     """
 
-    def __init__(self, data_path: str = None):
+    def __init__(self, data_path: str = None, output_dir: str = None):
         if data_path is None:
             data_path = PROJECT_ROOT / "data" / "LMN_VAR" / "Dates_and_Data.dta"
         self.data_path = Path(data_path)
-        self.output_dir = PROJECT_ROOT / "output" / "figures"
+        if output_dir is None:
+            output_dir = PROJECT_ROOT / "output" / "figures"
+        self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
         # VAR dimensions

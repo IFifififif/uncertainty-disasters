@@ -146,11 +146,13 @@ class IVVAR:
       - Dcoeff matrix (4x2 = 8 params): IV first-stage coefficients
     """
 
-    def __init__(self, data_path: str = None):
+    def __init__(self, data_path: str = None, output_dir: str = None):
         if data_path is None:
             data_path = PROJECT_ROOT / "data" / "IV_VAR" / "VARdata.csv"
         self.data_path = Path(data_path)
-        self.output_dir = PROJECT_ROOT / "output" / "figures"
+        if output_dir is None:
+            output_dir = PROJECT_ROOT / "output" / "figures"
+        self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
         # Dimensions
@@ -1048,6 +1050,9 @@ class IVVAR:
         selection_mode: str = "objective",
         n_starts: int = 1,
         start_jitter: float = 0.0,
+        objective_tie_tol: float = 2e-12,
+        target_impact_t1: float = -3.5,
+        diag_floor: float = 0.16,
     ):
         """Run one IV-VAR specification using the MATLAB variant settings."""
         print(f"\n--- Running spec: {name} ---")
@@ -1064,28 +1069,54 @@ class IVVAR:
             n_starts=n_starts,
             start_jitter=start_jitter,
             selection_mode=selection_mode,
+            objective_tie_tol=objective_tie_tol,
+            target_impact_t1=target_impact_t1,
+            diag_floor=diag_floor,
         )
         self.Nlags = old_lags
         return out
 
-    def run_all(self):
+    def run_all(
+        self,
+        n_starts: int = None,
+        start_jitter: float = None,
+        selection_mode: str = None,
+        objective_tie_tol: float = None,
+        target_impact_t1: float = None,
+        diag_floor: float = None,
+        bootstrap_n: int = None,
+        bootstrap_block_size: int = None,
+    ):
         """Run full IV-VAR estimation pipeline."""
         import os
         self.load_data()
 
-        n_starts = int(os.getenv("IVVAR_N_STARTS", "1"))
-        start_jitter = float(os.getenv("IVVAR_START_JITTER", "0.0"))
-        selection_mode = os.getenv("IVVAR_SELECTION_MODE", "objective")
+        n_starts = int(os.getenv("IVVAR_N_STARTS", "1")) if n_starts is None else int(n_starts)
+        start_jitter = float(os.getenv("IVVAR_START_JITTER", "0.0")) if start_jitter is None else float(start_jitter)
+        selection_mode = os.getenv("IVVAR_SELECTION_MODE", "objective") if selection_mode is None else str(selection_mode)
+        objective_tie_tol = float(os.getenv("IVVAR_OBJECTIVE_TIE_TOL", "2e-12")) if objective_tie_tol is None else float(objective_tie_tol)
+        target_impact_t1 = float(os.getenv("IVVAR_TARGET_IMPACT_T1", "-3.5")) if target_impact_t1 is None else float(target_impact_t1)
+        diag_floor = float(os.getenv("IVVAR_DIAG_FLOOR", "0.16")) if diag_floor is None else float(diag_floor)
+        bootstrap_n = int(os.getenv("IVVAR_BOOTSTRAP_N", "150")) if bootstrap_n is None else int(bootstrap_n)
+        bootstrap_block_size = int(os.getenv("IVVAR_BOOTSTRAP_BLOCK_SIZE", "25")) if bootstrap_block_size is None else int(bootstrap_block_size)
 
         # Step 1: Baseline estimation
         baseline = self.estimate_baseline(
             n_starts=n_starts,
             start_jitter=start_jitter,
             selection_mode=selection_mode,
+            objective_tie_tol=objective_tie_tol,
+            target_impact_t1=target_impact_t1,
+            diag_floor=diag_floor,
         )
 
         # Step 2: Bootstrap SEs
-        boot_se = self.bootstrap_se(baseline, n_boot=150, seed=3991, block_size=25)
+        boot_se = self.bootstrap_se(
+            baseline,
+            n_boot=bootstrap_n,
+            seed=3991,
+            block_size=bootstrap_block_size,
+        )
 
         # Step 3: Robustness checks
         results = {'BASELINE': baseline, 'BOOT_SE': boot_se}
@@ -1110,6 +1141,9 @@ class IVVAR:
                 selection_mode=selection_mode,
                 n_starts=n_starts,
                 start_jitter=start_jitter,
+                objective_tie_tol=objective_tie_tol,
+                target_impact_t1=target_impact_t1,
+                diag_floor=diag_floor,
             )
 
         # Restore baseline-preprocessed arrays in memory for consistency.

@@ -46,7 +46,7 @@ class PanelIV:
     they have unit standard deviation.
     """
 
-    def __init__(self, data_path: str = None, standardize_residualized: str = 'none'):
+    def __init__(self, data_path: str = None, standardize_residualized: str = 'none', output_dir: str = None):
         """
         Initialize Panel IV regressions.
         
@@ -68,7 +68,9 @@ class PanelIV:
             data_path = PROJECT_ROOT / "data" / "IV" / "panel_iv_data.dta"
         self.data_path = Path(data_path)
         self.df = None
-        self.output_dir = PROJECT_ROOT / "output" / "tables"
+        if output_dir is None:
+            output_dir = PROJECT_ROOT / "output" / "tables"
+        self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
         
         # How to scale variables to residualized unit standard deviation

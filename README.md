@@ -28,24 +28,36 @@ pip install -r requirements.txt
 
 ## Usage
 
-### IV Panel Regressions (Tables 1–6)
+### Unified Configuration (recommended)
+
+All runtime parameters are centralized in:
+
+`config/experiment_config.json`
+
+You can manage in one place:
+- data file names/paths for each module (`data_path`)
+- estimation/selection parameters (for example IV-VAR multi-start and selection mode)
+- LMN draw count
+- MODEL runtime options
+- multi-dataset jobs and parallel execution (`jobs`, `parallel`)
+
+Run with unified config:
+
 ```bash
-python -m src.iv.panel_iv
+python run_all.py
 ```
 
-### IV-VAR Estimation (Figures 6–7)
-```bash
-python -m src.iv_var.run_estimation
-```
+Optional:
 
-### LMN VAR (Figures 3–5)
 ```bash
-python -m src.lmn_var.run_estimation
-```
+# Run selected modules for enabled jobs
+python run_all.py iv iv_var
 
-### Model Simulation (Figure 8)
-```bash
-python -m src.model.run_simulation
+# Run only specific jobs
+python run_all.py --jobs baseline
+
+# Force sequential run (disable process parallelization for this run)
+python run_all.py --sequential
 ```
 
 ## Project Structure
@@ -64,9 +76,13 @@ python -m src.model.run_simulation
 │   └── utils/           # Shared utilities
 ├── output/
 │   ├── tables/
-│   └── figures/
+│   ├── figures/
+│   └── runs/            # Per-job outputs from unified runner
+├── config/
+│   └── experiment_config.json
 ├── tests/
 ├── requirements.txt
+├── run_all.py
 └── README.md
 ```
 

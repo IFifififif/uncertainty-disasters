@@ -1,0 +1,55 @@
+{
+  "parallel": {
+    "enabled": true,
+    "max_workers": 2
+  },
+  "default_modules": ["iv", "iv_var", "lmn_var", "model"],
+  "defaults": {
+    "iv": {
+      "data_path": "data/IV/panel_iv_data.dta",
+      "standardize_residualized": "none"
+    },
+    "iv_var": {
+      "data_path": "data/IV_VAR/VARdata.csv",
+      "n_starts": 120,
+      "start_jitter": 0.2,
+      "selection_mode": "paper_anchor",
+      "objective_tie_tol": 2e-12,
+      "target_impact_t1": -3.5,
+      "diag_floor": 0.16,
+      "bootstrap_n": 150,
+      "bootstrap_block_size": 25
+    },
+    "lmn_var": {
+      "data_path": "data/LMN_VAR/Dates_and_Data.dta",
+      "n_draws": 1500000
+    },
+    "model": {
+      "simplified": false,
+      "do_estimation": false,
+      "irf_t": 40,
+      "irf_n_sims": 100
+    }
+  },
+  "jobs": [
+    {
+      "name": "baseline",
+      "enabled": true
+    },
+    {
+      "name": "quick_sanity",
+      "enabled": false,
+      "iv_var": {
+        "bootstrap_n": 30
+      },
+      "lmn_var": {
+        "n_draws": 5000
+      },
+      "model": {
+        "simplified": true,
+        "irf_n_sims": 20
+      }
+    }
+  ]
+}
+

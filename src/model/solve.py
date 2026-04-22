@@ -66,7 +66,7 @@ class MicroMacroModel:
     >>> model.run_all()
     """
     
-    def __init__(self, simplified: bool = False):
+    def __init__(self, simplified: bool = False, output_dir: str = None):
         """
         Initialize the model.
         
@@ -76,7 +76,9 @@ class MicroMacroModel:
             If True, use smaller grid sizes for faster computation.
             Default is False to better align with Fortran baseline grids.
         """
-        self.output_dir = PROJECT_ROOT / "output" / "figures"
+        if output_dir is None:
+            output_dir = PROJECT_ROOT / "output" / "figures"
+        self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.simplified = simplified
         

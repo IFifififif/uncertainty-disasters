@@ -18,6 +18,13 @@ output/tables/*.xls
 output/tables/*.xlsx
 output/figures/*.pdf
 output/figures/*.png
+output/runs/
+output/model_cache/
+output/tmp_*.json
+output/*.csv
+output/*.json
+output/*.md
+output/*.pdf
 
 # Data (large files)
 # Uncomment if tracking data separately:
