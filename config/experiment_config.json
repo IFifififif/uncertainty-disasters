@@ -1,15 +1,48 @@
 {
+  "__doc__": {
+    "how_to_use": [
+      "Edit this file only; run: python run_all.py",
+      "Define one or more jobs under `jobs`.",
+      "Each job inherits `defaults`; job-level module blocks override defaults.",
+      "Outputs are written to output/runs/<job_name>/..."
+    ],
+    "paper_and_code_mapping_doc": "See config/PARAMETER_REFERENCE.md for full parameter-by-parameter mapping to paper sections and baseline values."
+  },
   "parallel": {
+    "__doc__": {
+      "enabled": "Run multiple jobs in parallel processes. Paper does not define this; engineering runtime control.",
+      "max_workers": "Maximum concurrent jobs when parallel.enabled=true. Paper does not define this."
+    },
     "enabled": true,
     "max_workers": 2
   },
-  "default_modules": ["iv", "iv_var", "lmn_var", "model"],
+  "default_modules": [
+    "iv",
+    "iv_var",
+    "lmn_var",
+    "model"
+  ],
   "defaults": {
     "iv": {
+      "__doc__": {
+        "data_path": "Input panel-IV dataset path. Maps to paper Tables 1-6 empirical sample.",
+        "standardize_residualized": "Scaling mode for first/second moments. Paper table notes state residualized unit-standard-deviation scaling over the regression sample (PDF p.10, p.13, p.15-17). Baseline replication keeps 'none' for raw coefficient scale."
+      },
       "data_path": "data/IV/panel_iv_data.dta",
       "standardize_residualized": "none"
     },
     "iv_var": {
+      "__doc__": {
+        "data_path": "Input IV-VAR sample. Maps to paper Figure 6-7 sample (GDP growth, returns, volatility).",
+        "n_starts": "Number of deterministic multi-start solves for GMM. Not explicitly in paper; implementation stabilization.",
+        "start_jitter": "Std. dev. of random perturbation around initial guess for extra starts. Not in paper.",
+        "selection_mode": "objective: minimum objective; paper_anchor: among near-optimal solutions pick one closest to paper Figure 6 impact language.",
+        "objective_tie_tol": "Near-optimal objective tolerance used by paper_anchor selection. Not in paper.",
+        "target_impact_t1": "Paper anchor for Figure 6 immediate impact. Paper text: 'just over 3.5 percentage points' drop (PDF p.22).",
+        "diag_floor": "Regularity floor for B22/B33 in paper_anchor candidate filtering. Not in paper.",
+        "bootstrap_n": "Bootstrap replications for Figure 6 confidence bands. Original MATLAB baseline uses 150.",
+        "bootstrap_block_size": "Stationary block bootstrap mean block length. Original MATLAB baseline uses 25."
+      },
       "data_path": "data/IV_VAR/VARdata.csv",
       "n_starts": 120,
       "start_jitter": 0.2,
@@ -21,10 +54,20 @@
       "bootstrap_block_size": 25
     },
     "lmn_var": {
+      "__doc__": {
+        "data_path": "Input disaster-event VAR dataset for LMN-style admissible-set analysis (paper Figures 3-5).",
+        "n_draws": "Admissible-set random draws. Paper discusses admissible responses (Figure 3); published text does not state N explicitly. Original baseline MATLAB code sets N=1,500,000."
+      },
       "data_path": "data/LMN_VAR/Dates_and_Data.dta",
       "n_draws": 1500000
     },
     "model": {
+      "__doc__": {
+        "simplified": "Use reduced grids for faster checks. Supplemental MODEL is outside the published main-paper quantitative targets.",
+        "do_estimation": "Run full GMM estimation in model block (very expensive). Supplemental module option.",
+        "irf_t": "IRF horizon in quarters for Figure 8-style output.",
+        "irf_n_sims": "Number of simulation paths averaged for IRF."
+      },
       "simplified": false,
       "do_estimation": false,
       "irf_t": 40,
@@ -33,6 +76,11 @@
   },
   "jobs": [
     {
+      "__doc__": {
+        "name": "Unique run name; outputs in output/runs/<name>/",
+        "enabled": "Whether this job is active in default run.",
+        "module_override": "Optional module blocks (iv/iv_var/lmn_var/model) to override defaults for this job."
+      },
       "name": "baseline",
       "enabled": true
     },

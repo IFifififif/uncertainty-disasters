@@ -34,6 +34,10 @@ All runtime parameters are centralized in:
 
 `config/experiment_config.json`
 
+Detailed parameter-by-parameter documentation (paper mapping + baseline values):
+
+`config/PARAMETER_REFERENCE.md`
+
 You can manage in one place:
 - data file names/paths for each module (`data_path`)
 - estimation/selection parameters (for example IV-VAR multi-start and selection mode)
@@ -59,6 +63,15 @@ python run_all.py --jobs baseline
 # Force sequential run (disable process parallelization for this run)
 python run_all.py --sequential
 ```
+
+### Configuration Notes
+
+- `experiment_config.json` includes inline `__doc__` fields for quick reference.
+- For each parameter, `PARAMETER_REFERENCE.md` states:
+  - what it controls in code,
+  - which paper section/figure/table it corresponds to,
+  - paper value (if explicitly provided),
+  - current repository baseline value.
 
 ## Project Structure
 
