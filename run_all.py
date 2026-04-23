@@ -35,6 +35,8 @@ def _load_config(config_path: Path) -> dict:
 
 
 def _merge_module_cfg(defaults: dict, job: dict, module: str) -> dict:
+    # Keep documentation keys (for human readability in config files) harmless:
+    # execution code only reads known runtime keys via .get(...).
     cfg = dict(defaults.get(module, {}))
     if isinstance(job.get(module), dict):
         cfg.update(job[module])
@@ -219,4 +221,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

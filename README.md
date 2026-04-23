@@ -4,7 +4,8 @@ Python replication of Baker, Bloom, and Terry (2024), *Review of Economic Studie
 
 ## Overview
 
-This project provides a complete Python reproduction of the original codebase (Stata + MATLAB + Fortran), replicating all tables and figures from the paper bit-for-bit.
+This project provides a high-fidelity Python reproduction of the original codebase (Stata + MATLAB + Fortran) and paper results.  
+Some modules (especially IV-VAR / LMN-VAR) involve numerically equivalent solution sets, so exact floating-point identity with MATLAB/Stata/Fortran is not guaranteed.
 
 ### Modules
 
@@ -72,6 +73,13 @@ python run_all.py --sequential
   - which paper section/figure/table it corresponds to,
   - paper value (if explicitly provided),
   - current repository baseline value.
+- Parameters not explicitly set by the paper are marked as engineering/runtime controls in `PARAMETER_REFERENCE.md`.
+
+### Reproducibility Scope
+
+- `IV` (Tables 1-6): point-estimate replication target.
+- `IV_VAR` / `LMN_VAR` (Figures 3-7): set-identification and optimization-path sensitivity exist; use config baselines for stable paper-facing comparisons.
+- `MODEL` (Figure 8): supplemental module in the original packet; treat as mechanism/qualitative validation unless explicitly benchmarking a fixed runtime profile.
 
 ## Project Structure
 
