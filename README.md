@@ -50,6 +50,111 @@ python run_all.py iv iv_var
 python run_all.py --jobs baseline
 ```
 
+### 2.1 并行计算三种场景（可直接复制）
+
+并行总开关（先确认）：
+
+```json
+"parallel": {
+  "enabled": true,
+  "max_workers": 3
+}
+```
+
+说明：
+- 并行是按 `jobs` 并行。
+- 同时有多个 `enabled: true` 的 job 时，`python run_all.py` 会并行执行它们。
+
+场景 A：同一数据，不同参数
+
+```json
+"jobs": [
+  {
+    "name": "same_data_param_a",
+    "enabled": true,
+    "iv_var": {
+      "data_path": "data/IV_VAR/VARdata.csv",
+      "bootstrap_n": 150
+    }
+  },
+  {
+    "name": "same_data_param_b",
+    "enabled": true,
+    "iv_var": {
+      "data_path": "data/IV_VAR/VARdata.csv",
+      "bootstrap_n": 300
+    }
+  }
+]
+```
+
+场景 B：同一参数，不同数据
+
+```json
+"jobs": [
+  {
+    "name": "same_param_data_a",
+    "enabled": true,
+    "iv_var": {
+      "data_path": "data/my_data/vardata_a.csv",
+      "bootstrap_n": 150
+    }
+  },
+  {
+    "name": "same_param_data_b",
+    "enabled": true,
+    "iv_var": {
+      "data_path": "data/my_data/vardata_b.csv",
+      "bootstrap_n": 150
+    }
+  }
+]
+```
+
+场景 C：不同数据，不同参数
+
+```json
+"jobs": [
+  {
+    "name": "diff_both_a",
+    "enabled": true,
+    "iv_var": {
+      "data_path": "data/my_data/vardata_a.csv",
+      "bootstrap_n": 100
+    },
+    "lmn_var": {
+      "data_path": "data/my_data/lmn_a.dta",
+      "n_draws": 300000
+    }
+  },
+  {
+    "name": "diff_both_b",
+    "enabled": true,
+    "iv_var": {
+      "data_path": "data/my_data/vardata_b.csv",
+      "bootstrap_n": 250
+    },
+    "lmn_var": {
+      "data_path": "data/my_data/lmn_b.dta",
+      "n_draws": 800000
+    }
+  }
+]
+```
+
+并行计算快速示例：
+
+```bash
+# 按 jobs 并行运行
+python run_all.py
+
+# 只并行跑指定两个任务
+python run_all.py --jobs same_data_param_a same_data_param_b
+
+# 用同一配置强制串行（对照测试）
+python run_all.py --sequential
+```
+
 ## 3. 用项目自带数据直接出结果
 
 默认配置已经指向项目数据：
