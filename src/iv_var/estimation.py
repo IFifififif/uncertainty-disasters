@@ -803,11 +803,18 @@ class IVVAR:
         T = self.T
         Nlags = self.Nlags
 
-        # Store bootstrap IRFs
-        IRF_S_TO_Y_store = np.zeros((n_boot, 15))
-        Bhat_store = np.zeros((n_boot, self.NX, self.NX))
-        Dcoeff_store = np.zeros((n_boot, self.ND, 2))
+        # Store only successful bootstrap draws. Zero-valued IRFs are valid data,
+        # so do not use an all-zero row as a failure sentinel.
+        IRF_S_TO_Y_store = []
+        Bhat_store = []
+        Dcoeff_store = []
         boot_bad = 0
+        failure_reasons = {}
+
+        def _record_failure(reason: str):
+            nonlocal boot_bad
+            boot_bad += 1
+            failure_reasons[reason] = failure_reasons.get(reason, 0) + 1
 
         for boot_ct in range(n_boot):
             # Stationary block bootstrap
@@ -841,7 +848,7 @@ class IVVAR:
 
                 min_obj = float(result.fun)
                 if (not result.success) or (min_obj > 4e-5):
-                    boot_bad += 1
+                    _record_failure("optimizer_failed_or_high_objective")
                     continue
 
                 paramhat_b = result.x
@@ -855,7 +862,7 @@ class IVVAR:
                 # We scale by the ratio of baseline to bootstrap variance
                 var_xb = np.var(Xb[:, 2], ddof=1)
                 if var_xb <= 1e-12 or abs(Bhat_b[2, 2]) <= 1e-10:
-                    boot_bad += 1
+                    _record_failure("invalid_scale_factor")
                     continue
                 SCALEFACT = (
                     np.sqrt(np.var(X[:, 2], ddof=1)) / np.sqrt(var_xb) *
@@ -865,8 +872,8 @@ class IVVAR:
                 # MATLAB BOOT/VAR.m computes unscaled IRFs then multiplies by SCALEFACT once.
                 IRF_b = self._compute_irf(Bhat_b, B1hat_b, Xb, self.lengthIRF, apply_scale=False)
                 IRF_b *= SCALEFACT
-                IRF_S_TO_Y_store[boot_ct] = IRF_b[:15, 0, 2]
-                Bhat_store[boot_ct] = Bhat_b
+                IRF_S_TO_Y_store.append(IRF_b[:15, 0, 2].copy())
+                Bhat_store.append(Bhat_b.copy())
                 
                 # Store Dcoeff
                 Dcoeff_b = np.zeros((self.ND, 2))
@@ -874,22 +881,30 @@ class IVVAR:
                 Dcoeff_b[2, 0] = paramhat_b[11]; Dcoeff_b[3, 0] = paramhat_b[12]
                 Dcoeff_b[0, 1] = paramhat_b[13]; Dcoeff_b[1, 1] = paramhat_b[14]
                 Dcoeff_b[2, 1] = paramhat_b[15]; Dcoeff_b[3, 1] = paramhat_b[16]
-                Dcoeff_store[boot_ct] = Dcoeff_b
+                Dcoeff_store.append(Dcoeff_b.copy())
 
             except Exception as e:
-                boot_bad += 1
+                _record_failure(type(e).__name__)
                 continue
 
             if (boot_ct + 1) % 100 == 0:
                 print(f"  Bootstrap {boot_ct + 1}/{n_boot}")
 
-        # Remove failed bootstraps
-        valid = IRF_S_TO_Y_store.any(axis=1)
-        IRF_S_TO_Y_store = IRF_S_TO_Y_store[valid]
-        Bhat_store = Bhat_store[valid]
-        Dcoeff_store = Dcoeff_store[valid]
+        IRF_S_TO_Y_store = np.asarray(IRF_S_TO_Y_store, dtype=np.float64)
+        Bhat_store = np.asarray(Bhat_store, dtype=np.float64)
+        Dcoeff_store = np.asarray(Dcoeff_store, dtype=np.float64)
         print(f"  Failed bootstraps: {boot_bad}")
         print(f"  Valid bootstraps: {len(IRF_S_TO_Y_store)}")
+        if failure_reasons:
+            print(f"  Bootstrap failure reasons: {failure_reasons}")
+
+        if len(IRF_S_TO_Y_store) < 2:
+            raise RuntimeError(
+                "Bootstrap produced fewer than 2 valid replications; "
+                "cannot compute ddof=1 standard errors. "
+                f"valid={len(IRF_S_TO_Y_store)}, failed={boot_bad}, "
+                f"failure_reasons={failure_reasons}"
+            )
 
         # Compute SEs (matching MATLAB's std with ddof=1)
         IRF_S_TO_Y_SE = np.std(IRF_S_TO_Y_store, axis=0, ddof=1)

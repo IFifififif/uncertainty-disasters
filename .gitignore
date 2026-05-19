@@ -20,11 +20,15 @@ output/figures/*.pdf
 output/figures/*.png
 output/runs/
 output/model_cache/
+output/reports/
+output/tmp/
 output/tmp_*.json
 output/*.csv
 output/*.json
 output/*.md
 output/*.pdf
+output/*.tex
+output/*.bib
 
 # Data (large files)
 # Uncomment if tracking data separately:

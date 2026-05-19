@@ -34,6 +34,18 @@ def _load_config(config_path: Path) -> dict:
         return json.load(f)
 
 
+def _as_bool(value, key: str) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"true", "1", "yes", "y", "on"}:
+            return True
+        if lowered in {"false", "0", "no", "n", "off"}:
+            return False
+    raise ValueError(f"Config value `{key}` must be a boolean, got {value!r}")
+
+
 def _merge_module_cfg(defaults: dict, job: dict, module: str) -> dict:
     # Keep documentation keys (for human readability in config files) harmless:
     # execution code only reads known runtime keys via .get(...).
@@ -123,11 +135,11 @@ def _run_one_job(payload: dict) -> dict:
             from src.model.solve import MicroMacroModel
             c = module_cfgs["model"]
             model = MicroMacroModel(
-                simplified=bool(c.get("simplified", False)),
+                simplified=_as_bool(c.get("simplified", False), "model.simplified"),
                 output_dir=str(run_root / "figures"),
             )
             model.run_all(
-                do_estimation=bool(c.get("do_estimation", False)),
+                do_estimation=_as_bool(c.get("do_estimation", False), "model.do_estimation"),
                 irf_T=int(c.get("irf_t", 40)),
                 irf_n_sims=int(c.get("irf_n_sims", 100)),
             )

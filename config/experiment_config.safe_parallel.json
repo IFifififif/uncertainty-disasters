@@ -1,0 +1,233 @@
+{
+  "__doc__": {
+    "purpose": "User-editable parallel run profile. Configure data paths, active modules, run phases, and report labels without changing Python code.",
+    "typical_workflow": [
+      "1) Edit defaults.*.data_path to point to your datasets.",
+      "2) Edit jobs to define one or more named experiments.",
+      "3) Edit run_groups to decide which jobs run together and which heavy jobs run sequentially.",
+      "4) Edit report to control the generated comparison .tex: title, variables, tables, figures, and numeric checks.",
+      "5) Run: bash scripts/run_safe_parallel_full.sh --config config/experiment_config.safe_parallel.json --with-report"
+    ],
+    "data_contract": {
+      "iv": "DTA file with the same required columns as data/templates/IV_full_template.dta.",
+      "iv_var": "CSV file with columns matching data/templates/IV_VAR_template.csv.",
+      "lmn_var": "DTA file with columns matching data/templates/LMN_VAR_template.dta, including event columns polshock/tershock/natshock/revshock.",
+      "model": "Simulation module; no external data file required."
+    }
+  },
+  "parallel": {
+    "enabled": true,
+    "max_workers": 2
+  },
+  "default_modules": [
+    "iv",
+    "iv_var",
+    "lmn_var",
+    "model"
+  ],
+  "defaults": {
+    "iv": {
+      "data_path": "data/IV/panel_iv_data.dta",
+      "standardize_residualized": "none"
+    },
+    "iv_var": {
+      "data_path": "data/IV_VAR/VARdata.csv",
+      "n_starts": 120,
+      "start_jitter": 0.2,
+      "selection_mode": "paper_anchor",
+      "objective_tie_tol": 2e-12,
+      "target_impact_t1": -3.5,
+      "diag_floor": 0.16,
+      "bootstrap_n": 150,
+      "bootstrap_block_size": 25
+    },
+    "lmn_var": {
+      "data_path": "data/LMN_VAR/Dates_and_Data.dta",
+      "n_draws": 1500000
+    },
+    "model": {
+      "simplified": false,
+      "do_estimation": false,
+      "irf_t": 40,
+      "irf_n_sims": 100
+    }
+  },
+  "jobs": [
+    {
+      "name": "user_iv",
+      "enabled": true,
+      "modules": [
+        "iv"
+      ],
+      "__doc__": "Copy this job and override iv.data_path when using your own panel-IV data."
+    },
+    {
+      "name": "user_iv_var",
+      "enabled": true,
+      "modules": [
+        "iv_var"
+      ],
+      "__doc__": "Copy this job and override iv_var.data_path/bootstrap_n/n_starts for your own IV-VAR run."
+    },
+    {
+      "name": "user_lmn_var",
+      "enabled": false,
+      "modules": [
+        "lmn_var"
+      ],
+      "__doc__": "Disabled by default because it is expensive. Enable or run through the heavy_sequential group."
+    },
+    {
+      "name": "user_model",
+      "enabled": false,
+      "modules": [
+        "model"
+      ],
+      "__doc__": "Disabled by default because full model solving is expensive."
+    }
+  ],
+  "run_groups": [
+    {
+      "name": "light_parallel",
+      "description": "Run lower-memory empirical jobs together.",
+      "enabled": true,
+      "jobs": [
+        "user_iv",
+        "user_iv_var"
+      ],
+      "sequential": false
+    },
+    {
+      "name": "lmn_sequential",
+      "description": "Run LMN VAR alone to avoid memory contention.",
+      "enabled": false,
+      "jobs": [
+        "user_lmn_var"
+      ],
+      "sequential": true
+    },
+    {
+      "name": "model_sequential",
+      "description": "Run model alone to avoid memory contention.",
+      "enabled": false,
+      "jobs": [
+        "user_model"
+      ],
+      "sequential": true
+    }
+  ],
+  "report": {
+    "enabled": true,
+    "title": "User Configured Replication Comparison Report",
+    "author": "Local Python Pipeline",
+    "summary_title": "User Run Summary",
+    "summary": "This report is generated from the jobs, tables, figures, labels, and numeric checks configured in config/experiment_config.safe_parallel.json. Edit this block to match your dataset, preferred variable names, and reporting targets.",
+    "output_root": "output",
+    "run_summary": "output/runs/run_summary.json",
+    "tex_output": "output/reports/repro_compare.tex",
+    "labels": {
+      "modules": {
+        "iv": "Panel IV",
+        "iv_var": "Disaster IV-VAR",
+        "lmn_var": "Event-Restrictions VAR",
+        "model": "Model Simulation"
+      },
+      "variables": {
+        "specification": "Specification",
+        "variable": "Variable",
+        "coefficient": "Coefficient",
+        "std_error": "Std. Error",
+        "nobs": "Observations",
+        "J_pval": "Over-ID p-value",
+        "F_stat_1st": "First-stage statistic"
+      }
+    },
+    "comparisons": [
+      {
+        "name": "iv_baseline_return_effect",
+        "module": "iv",
+        "metric": "Baseline return coefficient",
+        "run": "user_iv",
+        "file": "tables/table2_baseline.csv",
+        "source_type": "csv",
+        "row_filter": {
+          "specification": "col2_iv",
+          "variable": "endog_0"
+        },
+        "value_column": "coefficient",
+        "expected": "",
+        "tolerance": null,
+        "comparator": "abs_tol"
+      },
+      {
+        "name": "iv_baseline_uncertainty_effect",
+        "module": "iv",
+        "metric": "Baseline uncertainty coefficient",
+        "run": "user_iv",
+        "file": "tables/table2_baseline.csv",
+        "source_type": "csv",
+        "row_filter": {
+          "specification": "col2_iv",
+          "variable": "endog_1"
+        },
+        "value_column": "coefficient",
+        "expected": "",
+        "tolerance": null,
+        "comparator": "abs_tol"
+      }
+    ],
+    "tables": [
+      {
+        "title": "Panel IV Baseline Results",
+        "run": "user_iv",
+        "file": "tables/table2_baseline.csv",
+        "columns": [
+          "specification",
+          "variable",
+          "coefficient",
+          "std_error",
+          "nobs",
+          "J_pval",
+          "F_stat_1st"
+        ],
+        "max_rows": 40
+      },
+      {
+        "title": "Panel IV Robustness Results",
+        "run": "user_iv",
+        "file": "tables/table3_robustness.csv",
+        "columns": [
+          "specification",
+          "variable",
+          "coefficient",
+          "std_error",
+          "nobs",
+          "J_pval"
+        ],
+        "max_rows": 60
+      }
+    ],
+    "figures": [
+      {
+        "title": "IV-VAR GDP Response",
+        "run": "user_iv_var",
+        "file": "figures/FIGURE6.pdf"
+      },
+      {
+        "title": "IV-VAR Robustness Responses",
+        "run": "user_iv_var",
+        "file": "figures/FIGURE7.pdf"
+      },
+      {
+        "title": "LMN VAR Baseline Envelope",
+        "run": "user_lmn_var",
+        "file": "figures/FIGURE3.pdf"
+      },
+      {
+        "title": "Model Simulation IRF",
+        "run": "user_model",
+        "file": "figures/FIGURE8.pdf"
+      }
+    ]
+  }
+}

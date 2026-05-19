@@ -42,6 +42,48 @@ def create_mt19937_rng(seed: int = 25041):
     return rng
 
 
+def _residualize_fixed_effects(
+    y: np.ndarray,
+    X: np.ndarray,
+    groups_by_fe: list[np.ndarray],
+    max_iter: int = 1000,
+    tol: float = 1e-12,
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Residualize y and X against one or more fixed effects.
+
+    This implements alternating projections, the standard within-transform used
+    by high-dimensional FE estimators such as reghdfe. A single pass over two FE
+    groups is not equivalent to absorbing both effects.
+    """
+    y_res = y.astype(np.float64, copy=True)
+    X_res = X.astype(np.float64, copy=True)
+    if not groups_by_fe:
+        return y_res, X_res
+
+    for _ in range(max_iter):
+        max_change = 0.0
+        for groups in groups_by_fe:
+            for g in np.unique(groups):
+                mask = groups == g
+                if not np.any(mask):
+                    continue
+
+                old_y = y_res[mask].copy()
+                old_X = X_res[mask].copy()
+                y_res[mask] -= y_res[mask].mean()
+                X_res[mask] -= X_res[mask].mean(axis=0)
+                max_change = max(
+                    max_change,
+                    float(np.max(np.abs(y_res[mask] - old_y))),
+                    float(np.max(np.abs(X_res[mask] - old_X))),
+                )
+        if max_change < tol:
+            break
+
+    return y_res, X_res
+
+
 class LMNVAR:
     """
     LMN VAR estimation matching the Stata + MATLAB implementation.
@@ -135,20 +177,12 @@ class LMNVAR:
             y = eq_data[dep_var].values.astype(np.float64)
             X = eq_data[regressor_names].values.astype(np.float64)
 
-            fe_cols = []
+            groups_by_fe = []
             if include_country_fe:
-                fe_cols.append('country')
+                groups_by_fe.append(eq_data['country'].values)
             if include_time_fe:
-                fe_cols.append('yq_int')
-            for fe_col in fe_cols:
-                groups = eq_data[fe_col].values
-                unique_groups = np.unique(groups)
-                for g in unique_groups:
-                    mask = groups == g
-                    n_g = mask.sum()
-                    if n_g > 0:
-                        y[mask] -= y[mask].mean()
-                        X[mask] -= X[mask].mean(axis=0)
+                groups_by_fe.append(eq_data['yq_int'].values)
+            y, X = _residualize_fixed_effects(y, X, groups_by_fe)
 
             # OLS on demeaned data
             XtX = X.T @ X
@@ -190,20 +224,13 @@ class LMNVAR:
             y = eq_data[dep_var].values.astype(np.float64)
             regressor_names = all_lag_cols
             X = eq_data[regressor_names].values.astype(np.float64)
-            
-            fe_cols = []
+
+            groups_by_fe = []
             if include_country_fe:
-                fe_cols.append('country')
+                groups_by_fe.append(eq_data['country'].values)
             if include_time_fe:
-                fe_cols.append('yq_int')
-            for fe_col in fe_cols:
-                groups = eq_data[fe_col].values
-                unique_groups = np.unique(groups)
-                for g in unique_groups:
-                    mask = groups == g
-                    if mask.sum() > 0:
-                        y[mask] -= y[mask].mean()
-                        X[mask] -= X[mask].mean(axis=0)
+                groups_by_fe.append(eq_data['yq_int'].values)
+            y, X = _residualize_fixed_effects(y, X, groups_by_fe)
             
             # Use stored beta
             beta = A_hat[eq_idx, :]
@@ -236,9 +263,10 @@ class LMNVAR:
                     setattr(self, event_name, data.loc[common_valid, col].values.astype(float))
                     break
             else:
-                # If not found, create dummy (all zeros)
-                print(f"  Warning: {event_name} not found in data, using zeros")
-                setattr(self, event_name, np.zeros(resid_matrix.shape[0]))
+                raise ValueError(
+                    f"Missing required LMN event column for {event_name}. "
+                    f"Expected one of: {', '.join(possible_cols)}"
+                )
         
         return self
 

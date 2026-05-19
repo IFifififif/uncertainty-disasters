@@ -96,12 +96,50 @@ def test_lmn_var_module():
     print("  [PASS] LMN VAR module loads and instantiates")
 
 
+def test_lmn_multi_fe_residualization():
+    """Two-way FE residualization should remove both group means."""
+    from src.lmn_var.estimation import _residualize_fixed_effects
+
+    country = np.repeat(np.arange(4), 5)
+    time = np.tile(np.arange(5), 4)
+    y = 2.0 * country + 0.5 * time + np.linspace(0, 1, len(country))
+    X = np.column_stack([
+        country - time,
+        3.0 * country + np.sin(time),
+    ])
+
+    y_res, X_res = _residualize_fixed_effects(y, X, [country, time])
+    for groups in [country, time]:
+        for g in np.unique(groups):
+            mask = groups == g
+            assert abs(y_res[mask].mean()) < 1e-10
+            assert np.all(np.abs(X_res[mask].mean(axis=0)) < 1e-10)
+    print("  [PASS] LMN two-way FE residualization")
+
+
 def test_model_module():
     """Test Model module instantiation."""
     from src.model.solve import MicroMacroModel
     model = MicroMacroModel()
     assert model.params is not None
     print("  [PASS] Model module instantiates")
+
+
+def test_runner_bool_parsing():
+    """Config booleans should not rely on Python truthiness for strings."""
+    from run_all import _as_bool
+
+    assert _as_bool(True, "x") is True
+    assert _as_bool(False, "x") is False
+    assert _as_bool("true", "x") is True
+    assert _as_bool("false", "x") is False
+    try:
+        _as_bool("maybe", "x")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("Ambiguous boolean string should fail")
+    print("  [PASS] Runner bool parsing")
 
 
 def test_utils():
@@ -139,7 +177,9 @@ if __name__ == '__main__':
     test_iv_var_candidate_selector_objective()
     test_iv_var_candidate_selector_paper_anchor()
     test_lmn_var_module()
+    test_lmn_multi_fe_residualization()
     test_model_module()
+    test_runner_bool_parsing()
 
     print("\n" + "=" * 50)
     print("ALL TESTS PASSED")

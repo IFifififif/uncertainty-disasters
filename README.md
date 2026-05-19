@@ -230,3 +230,36 @@ python run_all.py --sequential
 ---
 
 如果你需要参数与论文逐条对应说明，请看：`config/PARAMETER_REFERENCE.md`。
+
+## 7. 可配置并行运行和自动 LaTeX 报告
+
+高级用户可以使用：
+
+```bash
+bash scripts/run_safe_parallel_full.sh --config config/experiment_config.safe_parallel.json --with-report
+```
+
+这个配置文件适合改成你自己的实验模板：
+
+- `defaults.*.data_path`：每个模块默认数据路径
+- `jobs`：定义多个实验任务，可为单个任务覆盖数据路径和参数
+- `run_groups`：定义哪些任务一起并行跑，哪些重任务单独串行跑
+- `report`：定义自动生成的 `.tex` 报告标题、变量标签、表格、图形和数值对比项
+
+只检查将要执行的命令，不真正运行：
+
+```bash
+bash scripts/run_safe_parallel_full.sh --dry-run --with-report
+```
+
+只跑指定分组：
+
+```bash
+bash scripts/run_safe_parallel_full.sh --groups light_parallel
+```
+
+单独生成报告：
+
+```bash
+python tools/build_repro_compare_tex.py --config config/experiment_config.safe_parallel.json
+```
