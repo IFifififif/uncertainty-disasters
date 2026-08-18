@@ -1,0 +1,5 @@
+buffer,nonmissing_panel_obs,analysis_obs,analysis_countries,analysis_year_min,analysis_year_max,share_of_baseline_iv_sample
+l1_domestic_credit_private_gdp,8148,3458,38,1987,2019,0.730460498521335
+l1_gfdd_nonlife_insurance_prem_gdp,6621,4086,38,1991,2019,0.8631178707224335
+l1_fiscal_space_1_fiscal_gross_debt_gdp,6322,3915,38,1991,2019,0.8269961977186312
+l1_fiscal_space_2_fiscal_primary_balance_gdp,6698,4082,37,1991,2019,0.8622729193071398

@@ -1,0 +1,73 @@
+{
+  "world_bank_indicators": {
+    "domestic_credit_private_gdp": "FS.AST.PRVT.GD.ZS",
+    "gfdd_nonlife_insurance_prem_gdp": "GFDD.DI.10"
+  },
+  "fiscal_space_url": "https://thedocs.worldbank.org/en/doc/31a9f7ffd7c72b9fbed93f3fb79af70a-0050012026/original/Fiscal-space-data.xlsx",
+  "fiscal_space_notes": {
+    "workbook_sheets": [
+      "Top",
+      "Variable_List",
+      "ggdy",
+      "pby",
+      "cby",
+      "fby",
+      "dfggd",
+      "dffb",
+      "ggdma",
+      "fbma",
+      "fxsovsh",
+      "secnres",
+      "fordebtsh",
+      "concggd",
+      "avglife",
+      "debtduey",
+      "xtdebty",
+      "fxdebtall",
+      "prdebty",
+      "pscy",
+      "stdebtall",
+      "stdebtres",
+      "xtdebtres",
+      "xtdebtrxg",
+      "sovrate",
+      "fxsovsh_Note",
+      "fordebtsh_Note",
+      "xtdebt_Note",
+      "pscy_Note"
+    ],
+    "selected_columns": {
+      "ggdy": [
+        "fiscal_gross_debt_gdp"
+      ],
+      "pby": [
+        "fiscal_primary_balance_gdp"
+      ],
+      "fby": [
+        "fiscal_balance_gdp"
+      ]
+    }
+  },
+  "missing_iso3_mappings": [],
+  "panel_rows": 12230,
+  "baseline_iv_complete_rows": 4734,
+  "output_files": [
+    "annual_buffers_raw.csv",
+    "bbt_d1_merged_panel_preview.csv",
+    "coverage_by_buffer.csv",
+    "first_stage_diagnostics.csv",
+    "second_stage_smoke_iv.csv",
+    "summary.json"
+  ],
+  "first_stage_summary": {
+    "buffers_tested": [
+      "l1_domestic_credit_private_gdp",
+      "l1_fiscal_space_1_fiscal_gross_debt_gdp",
+      "l1_fiscal_space_2_fiscal_primary_balance_gdp",
+      "l1_gfdd_nonlife_insurance_prem_gdp"
+    ],
+    "weak_interaction_tests_F_lt_10": 3,
+    "strongest_interaction_F": 283.89164918882204,
+    "weakest_interaction_F": 0.3072376868472113
+  }
+}

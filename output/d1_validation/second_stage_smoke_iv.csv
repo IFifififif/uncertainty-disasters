@@ -1,0 +1,17 @@
+buffer,term,nobs,nclusters,coef,std_error,p_value,instruments_total,instruments_kept
+l1_domestic_credit_private_gdp,cs_index_ret,3458,38,-0.007869902289234787,0.7240654797834631,0.9913279253407332,8,7
+l1_domestic_credit_private_gdp,cs_index_vol,3458,38,-1.4144640287712016,0.8487016815213757,0.09558979431198145,8,7
+l1_domestic_credit_private_gdp,cs_index_ret_x_l1_domestic_credit_private_gdp,3458,38,0.3409680364079317,0.3338618231243078,0.30711948154680546,8,7
+l1_domestic_credit_private_gdp,cs_index_vol_x_l1_domestic_credit_private_gdp,3458,38,-0.2693447112703639,0.44232853444676223,0.5425744396047656,8,7
+l1_gfdd_nonlife_insurance_prem_gdp,cs_index_ret,4086,38,6.805303370246975,15.612966949655329,0.6629273594049954,8,6
+l1_gfdd_nonlife_insurance_prem_gdp,cs_index_vol,4086,38,-1.677058621529568,8.833405707867602,0.8494234317396543,8,6
+l1_gfdd_nonlife_insurance_prem_gdp,cs_index_ret_x_l1_gfdd_nonlife_insurance_prem_gdp,4086,38,-1.3533600794571043,6.823379189048384,0.8427777907255585,8,6
+l1_gfdd_nonlife_insurance_prem_gdp,cs_index_vol_x_l1_gfdd_nonlife_insurance_prem_gdp,4086,38,-4.385316149138248,14.590072550400068,0.7637435584510437,8,6
+l1_fiscal_space_1_fiscal_gross_debt_gdp,cs_index_ret,3915,38,0.3747676330556948,1.6580190541629267,0.8211754669696323,8,6
+l1_fiscal_space_1_fiscal_gross_debt_gdp,cs_index_vol,3915,38,-2.648181695683186,3.1611575736557858,0.40218499744255753,8,6
+l1_fiscal_space_1_fiscal_gross_debt_gdp,cs_index_ret_x_l1_fiscal_space_1_fiscal_gross_debt_gdp,3915,38,-1.1362020418147312,0.9929362361288949,0.2525054616157012,8,6
+l1_fiscal_space_1_fiscal_gross_debt_gdp,cs_index_vol_x_l1_fiscal_space_1_fiscal_gross_debt_gdp,3915,38,0.6174744727572525,1.264740692654309,0.6253924674959996,8,6
+l1_fiscal_space_2_fiscal_primary_balance_gdp,cs_index_ret,4082,37,-0.08990272664238308,0.8987592492568297,0.9203206505989463,8,7
+l1_fiscal_space_2_fiscal_primary_balance_gdp,cs_index_vol,4082,37,-5.45094767341588,1.3043640781755292,2.927836287391905e-05,8,7
+l1_fiscal_space_2_fiscal_primary_balance_gdp,cs_index_ret_x_l1_fiscal_space_2_fiscal_primary_balance_gdp,4082,37,1.578370911721886,1.025727963864225,0.12385771992098027,8,7
+l1_fiscal_space_2_fiscal_primary_balance_gdp,cs_index_vol_x_l1_fiscal_space_2_fiscal_primary_balance_gdp,4082,37,1.2265659231092405,1.4373675144034808,0.39346973175678857,8,7
